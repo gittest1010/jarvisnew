@@ -5,7 +5,7 @@ publish_to: 'none'
 version: 1.0.0
 
 environment:
-  # CHANGED: Updated SDK to 3.0.0 because 'record' package requires Dart 3
+  # SDK updated for compatibility
   sdk: ">=3.0.0 <4.0.0"
   flutter: ">=3.0.0"
 
@@ -17,13 +17,11 @@ dependencies:
   path_provider: ^2.1.3
   path: ^1.9.0
   
-  # Record package for audio recording
-  record: ^5.2.0 
+  # UPDATED: Updated to 6.1.2 to resolve version conflicts and Linux errors
+  record: ^6.1.2 
   
-  # --- FIX FOR BUILD ERROR ---
-  # Explicitly forcing newer record_linux to avoid version 0.7.2 conflict
-  record_linux: ^1.1.0
-  # ---------------------------
+  # REMOVED: Explicit record_linux is no longer needed with record ^6.1.2
+  # record_linux: ^1.1.0
 
   url_launcher: ^6.2.6
   permission_handler: ^11.3.1
