@@ -1,13 +1,12 @@
 import 'dart:async';
 import 'dart:typed_data';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa_onnx;
+import 'package:permission_handler/permission_handler.dart';
 
-// --- UTILITY FUNCTION (To avoid needing utils.dart) ---
+// --- UTILITY FUNCTION ---
 Float32List convertBytesToFloat32(Uint8List bytes) {
   final int length = bytes.length ~/ 2;
   final Float32List float32List = Float32List(length);
@@ -59,12 +58,10 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     _controller = TextEditingController();
     _audioRecorder = AudioRecorder();
     
-    // Listen to recording state changes
     _recordSub = _audioRecorder.onStateChanged().listen((recordState) {
       setState(() => _recordState = recordState);
     });
 
-    // Initialize Sherpa (STT + TTS)
     _initSherpa();
   }
 
@@ -72,12 +69,14 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
   Future<void> _initSherpa() async {
     try {
       // 1. Initialize Speech-to-Text (STT) - Whisper Tiny
+      // FIX APPLIED: Added 'tokens' parameter which is now required in v1.12.20
       final sttModelConfig = sherpa_onnx.OnlineModelConfig(
         transducer: sherpa_onnx.OnlineTransducerModelConfig(
           encoder: 'assets/tiny-encoder.int8.onnx',
           decoder: 'assets/tiny-decoder.int8.onnx',
           joiner: 'assets/tokens.txt',
         ),
+        tokens: 'assets/tokens.txt', // <--- REQUIRED FIX HERE
       );
       
       final sttConfig = sherpa_onnx.OnlineRecognizerConfig(
@@ -99,7 +98,9 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
         ),
       );
       
-      _ttsEngine = sherpa_onnx.OfflineTts(config: ttsConfig);
+      // FIX APPLIED: Removed 'config:' named argument.
+      // In newer versions, OfflineTts takes a positional argument.
+      _ttsEngine = sherpa_onnx.OfflineTts(ttsConfig); // <--- REQUIRED FIX HERE
 
       setState(() {
         _isInitialized = true;
@@ -118,6 +119,12 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
   Future<void> _startRecording() async {
     if (!_isInitialized) return;
 
+    var status = await Permission.microphone.request();
+    if (status != PermissionStatus.granted) {
+        print("Microphone permission denied");
+        return;
+    }
+
     // Create a new stream for the recognizer
     _sttStream?.free();
     _sttStream = _sttRecognizer?.createStream();
@@ -130,12 +137,10 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
           numChannels: 1,
         );
 
-        // Start recording to stream
         final stream = await _audioRecorder.startStream(config);
 
         stream.listen(
           (data) {
-            // Process audio data
             final samplesFloat32 = convertBytesToFloat32(Uint8List.fromList(data));
             
             _sttStream!.acceptWaveform(samples: samplesFloat32, sampleRate: _sampleRate);
@@ -146,7 +151,6 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
             
             final text = _sttRecognizer!.getResult(_sttStream!).text;
             
-            // UI Update Logic
             bool isEndpoint = _sttRecognizer!.isEndpoint(_sttStream!);
             _updateUiWithText(text, isEndpoint);
 
@@ -166,28 +170,30 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
 
   Future<void> _stopRecording() async {
     await _audioRecorder.stop();
-    _sttStream?.free();
-    _sttStream = null;
+    // Don't free stream immediately if you want to keep the session alive
+    // _sttStream?.free(); 
+    // _sttStream = null;
   }
 
   void _updateUiWithText(String currentText, bool isEndpoint) {
     if (currentText.isNotEmpty) {
-      String display = _lastRecognizedText;
-      if (display.isEmpty) {
-        display = '$_sentenceIndex: $currentText';
-      } else {
-        display = '$_sentenceIndex: $currentText\n$_lastRecognizedText';
+      
+      // Logic to append text for display
+      String fullText = '$_sentenceIndex: $currentText';
+      if (_lastRecognizedText.isNotEmpty) {
+         fullText = '$fullText\n$_lastRecognizedText';
       }
 
       _controller.value = TextEditingValue(
-        text: display,
-        selection: TextSelection.collapsed(offset: display.length),
+        text: fullText,
+        selection: TextSelection.collapsed(offset: fullText.length),
       );
       
-      // If sentence finished (Endpoint), Speak it back (TTS)
       if (isEndpoint) {
-        _lastRecognizedText = display;
+        // Update history
+        _lastRecognizedText = fullText;
         _sentenceIndex++;
+        
         // Trigger TTS
         _speakText(currentText);
       }
@@ -203,16 +209,8 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     // Generate Audio
     final audio = _ttsEngine!.generate(text: text, sid: 0, speed: 1.0);
     
-    // NOTE: In a real app, you would use 'audioplayers' or 'soundpool' package 
-    // to play 'audio.samples'. Since we are keeping code simple, we will 
-    // save it to a file to prove it works.
-    
     if (audio.samples.isNotEmpty) {
-       print("TTS Generated ${audio.samples.length} samples. (Add AudioPlayer to hear it)");
-       // Code to save wav file (Optional verification)
-       // final dir = await getTemporaryDirectory();
-       // final file = File('${dir.path}/tts_output.wav');
-       // ... write wav header and samples ...
+       print("TTS Generated ${audio.samples.length} samples. (Logic to play audio would go here)");
     }
   }
 
