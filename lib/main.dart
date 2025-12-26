@@ -4,28 +4,34 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // For rootBundle
+import 'package:flutter/services.dart' show rootBundle, ByteData;
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa_onnx;
 import 'package:permission_handler/permission_handler.dart';
-import 'package:audioplayers/audioplayers.dart'; // For Playing Audio
+import 'package:audioplayers/audioplayers.dart';
 
-// --- UTILITY FUNCTION ---
+// --- UTILITY: Convert Raw Audio Bytes to Float32 for Sherpa ---
 Float32List convertBytesToFloat32(Uint8List bytes) {
   final int length = bytes.length ~/ 2;
   final Float32List float32List = Float32List(length);
   final ByteData byteData = ByteData.sublistView(bytes);
 
   for (int i = 0; i < length; i++) {
+    // 16-bit PCM (Little Endian)
     int sample = byteData.getInt16(i * 2, Endian.little);
+    // Normalize to -1.0 to 1.0
     float32List[i] = sample / 32768.0;
   }
   return float32List;
 }
 
 void main() {
-  runApp(const MaterialApp(home: VoiceAssistantScreen()));
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const MaterialApp(
+    debugShowCheckedModeBanner: false,
+    home: VoiceAssistantScreen()
+  ));
 }
 
 class VoiceAssistantScreen extends StatefulWidget {
@@ -36,25 +42,21 @@ class VoiceAssistantScreen extends StatefulWidget {
 }
 
 class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
-  // UI Controllers
-  late final TextEditingController _controller;
+  final TextEditingController _controller = TextEditingController();
   String _statusText = "Initializing...";
   
-  // Audio Recording
+  // Audio Objects
   late final AudioRecorder _audioRecorder;
-  StreamSubscription<RecordState>? _recordSub;
-  RecordState _recordState = RecordState.stop;
-
-  // Audio Playing
   late final AudioPlayer _audioPlayer;
-
-  // Sherpa ONNX Engines
+  
+  // Sherpa Objects
   sherpa_onnx.OnlineRecognizer? _sttRecognizer;
   sherpa_onnx.OnlineStream? _sttStream;
   sherpa_onnx.OfflineTts? _ttsEngine;
   
-  // State Variables
+  // State
   bool _isInitialized = false;
+  bool _isRecording = false;
   String _lastRecognizedText = '';
   int _sentenceIndex = 0;
   final int _sampleRate = 16000;
@@ -62,284 +64,284 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController();
     _audioRecorder = AudioRecorder();
-    _audioPlayer = AudioPlayer(); // Initialize Player
-    
-    _recordSub = _audioRecorder.onStateChanged().listen((recordState) {
-      setState(() => _recordState = recordState);
-    });
-
-    _requestPermissionsAndInit();
+    _audioPlayer = AudioPlayer();
+    _startSetupProcess();
   }
 
-  Future<void> _requestPermissionsAndInit() async {
-    // Permissions maangna zaruri hai
+  // --- STEP 1: PERMISSIONS & SETUP ---
+  Future<void> _startSetupProcess() async {
+    // 1. Ask Microphone Permission
     var status = await Permission.microphone.request();
     if (status != PermissionStatus.granted) {
-      setState(() => _statusText = "Microphone permission denied!");
+      setState(() => _statusText = "Microphone permission denied ❌");
       return;
     }
-    await _initSherpa();
+
+    // 2. Initialize Engines
+    await _initSherpaEngines();
   }
 
-  // --- ASSET COPYING LOGIC (FILES) ---
+  // --- STEP 2: COPY ASSETS TO PHONE STORAGE ---
+  // Ye function single files copy karta hai
   Future<String> _copyAssetToFile(String assetPath) async {
-    final docsDir = await getApplicationDocumentsDirectory();
-    final fileName = assetPath.split('/').last;
-    final file = File('${docsDir.path}/$fileName');
+    try {
+      final docsDir = await getApplicationDocumentsDirectory();
+      final fileName = assetPath.split('/').last;
+      final file = File('${docsDir.path}/$fileName');
 
-    if (!await file.exists()) {
-      final data = await rootBundle.load(assetPath);
-      final bytes = data.buffer.asUint8List();
-      await file.writeAsBytes(bytes);
+      // Agar file pehle se hai to overwrite nahi karenge (Speed badhegi)
+      if (!await file.exists()) {
+        setState(() => _statusText = "Copying $fileName...");
+        final data = await rootBundle.load(assetPath);
+        final bytes = data.buffer.asUint8List();
+        await file.writeAsBytes(bytes, flush: true);
+      }
+      return file.path;
+    } catch (e) {
+      print("Error copying file $assetPath: $e");
+      throw Exception("Could not copy $assetPath");
     }
-    return file.path;
   }
 
-  // --- ASSET COPYING LOGIC (FOLDERS) - Fixes espeak-ng-data error ---
+  // Ye function poore folder (espeak-ng-data) ko copy karta hai
   Future<String> _copyAssetFolder(String assetFolderPath) async {
     final docsDir = await getApplicationDocumentsDirectory();
-    final localDir = Directory('${docsDir.path}/${assetFolderPath.split('/').last}');
+    final localFolder = Directory('${docsDir.path}/${assetFolderPath.split('/').last}');
     
-    if (!await localDir.exists()) {
-      await localDir.create(recursive: true);
+    // Hamesha check karein taaki bar bar copy na ho
+    if (await localFolder.exists()) {
+       // Optional: Agar aapko lagta hai files corrupt hain to ise delete karke wapas copy kar sakte hain
+       // await localFolder.delete(recursive: true);
+       return localFolder.path;
     }
+    
+    await localFolder.create(recursive: true);
 
-    // Load AssetManifest to find all files in the folder
-    final manifestContent = await rootBundle.loadString('AssetManifest.json');
-    final Map<String, dynamic> manifestMap = json.decode(manifestContent);
+    try {
+      // AssetManifest load karein taaki folder ke andar ki files mil sakein
+      final manifestContent = await rootBundle.loadString('AssetManifest.json');
+      final Map<String, dynamic> manifestMap = json.decode(manifestContent);
 
-    // Filter files belonging to this folder
-    final filePaths = manifestMap.keys
-        .where((String key) => key.startsWith(assetFolderPath))
-        .toList();
+      // Sirf wo files filter karein jo is folder mein hain
+      final filePaths = manifestMap.keys
+          .where((String key) => key.contains('espeak-ng-data'))
+          .toList();
 
-    for (final filePath in filePaths) {
-      final relativePath = filePath.substring(assetFolderPath.length);
-      final localFilePath = '${localDir.path}/$relativePath';
-      final localFile = File(localFilePath);
-
-      if (!await localFile.exists()) {
-        final parentDir = localFile.parent;
-        if (!await parentDir.exists()) {
-          await parentDir.create(recursive: true);
-        }
-        final data = await rootBundle.load(filePath);
-        await localFile.writeAsBytes(data.buffer.asUint8List());
+      if (filePaths.isEmpty) {
+        throw Exception("espeak-ng-data folder empty hai! Pubspec check karein.");
       }
+
+      for (final filePath in filePaths) {
+        // Path fix karein (assets/espeak-ng-data/lang -> local/espeak-ng-data/lang)
+        // Hame sirf folder ke baad ka hissa chahiye
+        final relativePathIndex = filePath.indexOf('espeak-ng-data/');
+        if (relativePathIndex == -1) continue;
+        
+        final relativePath = filePath.substring(relativePathIndex); 
+        final localFilePath = '${docsDir.path}/$relativePath';
+        final localFile = File(localFilePath);
+
+        if (!await localFile.exists()) {
+          setState(() => _statusText = "Unpacking data...");
+          // Parent folder banayein agar nahi hai
+          await localFile.parent.create(recursive: true);
+          
+          final data = await rootBundle.load(filePath);
+          await localFile.writeAsBytes(data.buffer.asUint8List(), flush: true);
+        }
+      }
+    } catch (e) {
+      print("Folder Copy Error: $e");
+      // Agar fail bhi ho, to path return kar dete hain, shayad files pehle se hon
     }
     
-    return localDir.path;
+    return localFolder.path;
   }
 
-  // --- INITIALIZATION ---
-  Future<void> _initSherpa() async {
+  // --- STEP 3: INITIALIZE SHERPA ---
+  Future<void> _initSherpaEngines() async {
     try {
-      setState(() => _statusText = "Copying Models (First Time)...");
+      setState(() => _statusText = "Loading AI Models...");
 
-      // 1. Copy STT Models
+      // A. Copy STT Files
       final encoderPath = await _copyAssetToFile('assets/tiny-encoder.int8.onnx');
       final decoderPath = await _copyAssetToFile('assets/tiny-decoder.int8.onnx');
       final tokensPath = await _copyAssetToFile('assets/tokens.txt');
-      
-      // 2. Copy TTS Models & Data
+
+      // B. Copy TTS Files
       final ttsModelPath = await _copyAssetToFile('assets/hi_IN-pratham-medium.onnx');
-      final ttsTokensPath = await _copyAssetToFile('assets/hi_IN-pratham-medium.onnx.json');
+      final ttsJsonPath = await _copyAssetToFile('assets/hi_IN-pratham-medium.onnx.json');
       
-      // CRITICAL FIX: Copy espeak-ng-data folder recursively
+      // C. Copy Data Folder (The Big One)
+      // Dhyan dein: 'assets/espeak-ng-data' pass kar rahe hain
       final espeakDataPath = await _copyAssetFolder('assets/espeak-ng-data');
 
-      // 3. Initialize STT
-      final sttModelConfig = sherpa_onnx.OnlineModelConfig(
-        transducer: sherpa_onnx.OnlineTransducerModelConfig(
-          encoder: encoderPath,
-          decoder: decoderPath,
-          joiner: tokensPath,
-        ),
-        tokens: tokensPath,
-      );
-      
+      // D. Configure STT (Sunne wala)
       final sttConfig = sherpa_onnx.OnlineRecognizerConfig(
-        model: sttModelConfig,
-        ruleFsts: '',
+        model: sherpa_onnx.OnlineModelConfig(
+          transducer: sherpa_onnx.OnlineTransducerModelConfig(
+            encoder: encoderPath,
+            decoder: decoderPath,
+            joiner: tokensPath,
+          ),
+          tokens: tokensPath,
+        ),
       );
-      
       _sttRecognizer = sherpa_onnx.OnlineRecognizer(sttConfig);
 
-      // 4. Initialize TTS
+      // E. Configure TTS (Bolne wala)
       final ttsConfig = sherpa_onnx.OfflineTtsConfig(
         model: sherpa_onnx.OfflineTtsModelConfig(
           vits: sherpa_onnx.OfflineTtsVitsModelConfig(
             model: ttsModelPath,
-            tokens: ttsTokensPath,
-            dataDir: espeakDataPath, // Using valid local path
+            tokens: ttsJsonPath,
+            dataDir: espeakDataPath, // Local path pass kiya
           ),
           provider: 'sherpa-onnx',
         ),
       );
-      
       _ttsEngine = sherpa_onnx.OfflineTts(ttsConfig);
 
       setState(() {
         _isInitialized = true;
-        _statusText = "Ready. Press Mic to Speak.";
+        _statusText = "Jarvis Ready. Tap Mic 🎙️";
       });
-      
+
     } catch (e) {
-      setState(() => _statusText = "Error: $e");
-      print("Error Initializing Sherpa: $e");
+      setState(() => _statusText = "Initialization Failed: $e");
+      print(e);
     }
   }
 
-  // --- RECORDING ---
-  Future<void> _startRecording() async {
+  // --- RECORDING LOGIC ---
+  Future<void> _toggleRecording() async {
     if (!_isInitialized) return;
 
-    _sttStream?.free();
-    _sttStream = _sttRecognizer?.createStream();
+    if (_isRecording) {
+      // Stop
+      await _audioRecorder.stop();
+      setState(() => _isRecording = false);
+    } else {
+      // Start
+      _sttStream?.free();
+      _sttStream = _sttRecognizer?.createStream();
 
-    try {
       if (await _audioRecorder.hasPermission()) {
-        const config = RecordConfig(
+        setState(() => _isRecording = true);
+        
+        final stream = await _audioRecorder.startStream(const RecordConfig(
           encoder: AudioEncoder.pcm16bits,
           sampleRate: 16000,
           numChannels: 1,
-        );
-        final stream = await _audioRecorder.startStream(config);
+        ));
 
-        stream.listen(
-          (data) {
-            final samplesFloat32 = convertBytesToFloat32(Uint8List.fromList(data));
-            _sttStream!.acceptWaveform(samples: samplesFloat32, sampleRate: _sampleRate);
-            
-            while (_sttRecognizer!.isReady(_sttStream!)) {
-              _sttRecognizer!.decode(_sttStream!);
-            }
-            
-            final text = _sttRecognizer!.getResult(_sttStream!).text;
-            bool isEndpoint = _sttRecognizer!.isEndpoint(_sttStream!);
-            
-            _updateUiWithText(text, isEndpoint);
+        stream.listen((data) {
+          final samples = convertBytesToFloat32(Uint8List.fromList(data));
+          _sttStream!.acceptWaveform(samples: samples, sampleRate: _sampleRate);
+          
+          while (_sttRecognizer!.isReady(_sttStream!)) {
+            _sttRecognizer!.decode(_sttStream!);
+          }
 
-            if (isEndpoint) {
-              _sttRecognizer!.reset(_sttStream!);
-            }
-          },
-        );
+          final text = _sttRecognizer!.getResult(_sttStream!).text;
+          bool isEndpoint = _sttRecognizer!.isEndpoint(_sttStream!);
+          
+          _updateUI(text, isEndpoint);
+
+          if (isEndpoint) {
+            _sttRecognizer!.reset(_sttStream!);
+          }
+        });
       }
-    } catch (e) {
-      print("Record Error: $e");
     }
   }
 
-  Future<void> _stopRecording() async {
-    await _audioRecorder.stop();
-  }
-
-  void _updateUiWithText(String currentText, bool isEndpoint) {
-    if (currentText.isNotEmpty) {
-      String fullText = '$_sentenceIndex: $currentText';
-      if (_lastRecognizedText.isNotEmpty) {
-         fullText = '$fullText\n$_lastRecognizedText';
-      }
-
+  void _updateUI(String text, bool isEndpoint) {
+    if (text.isNotEmpty) {
+      String fullText = '$_sentenceIndex: $text\n$_lastRecognizedText';
+      // UI Update
       _controller.value = TextEditingValue(
         text: fullText,
         selection: TextSelection.collapsed(offset: fullText.length),
       );
-      
+
       if (isEndpoint) {
         _lastRecognizedText = fullText;
         _sentenceIndex++;
-        // Stop recording temporarily while speaking to avoid echo
-        _stopRecording().then((_) => _speakText(currentText));
+        // Stop Mic temporarily to avoid echo
+        _toggleRecording().then((_) {
+          _speak(text);
+        });
       }
     }
   }
 
-  // --- TTS PLAYBACK LOGIC (The Magic Part) ---
-  Future<void> _speakText(String text) async {
+  // --- SPEAKING LOGIC (With AudioPlayer) ---
+  Future<void> _speak(String text) async {
     if (_ttsEngine == null || text.isEmpty) return;
+    print("Speaking: $text");
 
-    print("Generating Audio...");
-    // 1. Generate Raw Audio
+    // 1. Generate Audio Samples
     final audio = _ttsEngine!.generate(text: text, sid: 0, speed: 1.0);
-    
     if (audio.samples.isEmpty) return;
 
     // 2. Convert to WAV File
     final dir = await getTemporaryDirectory();
-    final filePath = '${dir.path}/tts_output.wav';
-    final wavFile = File(filePath);
-
-    // Create WAV Header and Write Data
-    final wavBytes = _createWavFile(audio.samples, audio.sampleRate);
-    await wavFile.writeAsBytes(wavBytes);
-
-    // 3. Play Immediately
-    print("Playing Audio...");
-    await _audioPlayer.play(DeviceFileSource(filePath));
+    final file = File('${dir.path}/tts_output.wav');
     
-    // Optional: Resume listening after speaking
-    // _startRecording(); 
+    // Create valid WAV header
+    final wavBytes = _createWavHeader(audio.samples, audio.sampleRate);
+    await file.writeAsBytes(wavBytes, flush: true);
+
+    // 3. Play
+    await _audioPlayer.play(DeviceFileSource(file.path));
   }
 
-  // --- WAV HEADER GENERATOR ---
-  Uint8List _createWavFile(Float32List samples, int sampleRate) {
-    int numSamples = samples.length;
+  // WAV Header Helper
+  Uint8List _createWavHeader(Float32List samples, int sampleRate) {
     int numChannels = 1;
     int bitsPerSample = 16;
     int byteRate = sampleRate * numChannels * bitsPerSample ~/ 8;
     int blockAlign = numChannels * bitsPerSample ~/ 8;
-    int subChunk2Size = numSamples * numChannels * bitsPerSample ~/ 8;
-    int chunkSize = 36 + subChunk2Size;
+    int dataSize = samples.length * numChannels * bitsPerSample ~/ 8;
+    int chunkSize = 36 + dataSize;
 
     var buffer = BytesBuilder();
-
-    // RIFF chunk
+    // RIFF
     buffer.add('RIFF'.codeUnits);
-    buffer.add(_int32ToBytes(chunkSize));
+    buffer.add(_int32(chunkSize));
     buffer.add('WAVE'.codeUnits);
-
-    // fmt chunk
+    // fmt
     buffer.add('fmt '.codeUnits);
-    buffer.add(_int32ToBytes(16)); // SubChunk1Size
-    buffer.add(_int16ToBytes(1)); // AudioFormat (PCM)
-    buffer.add(_int16ToBytes(numChannels));
-    buffer.add(_int32ToBytes(sampleRate));
-    buffer.add(_int32ToBytes(byteRate));
-    buffer.add(_int16ToBytes(blockAlign));
-    buffer.add(_int16ToBytes(bitsPerSample));
-
-    // data chunk
+    buffer.add(_int32(16));
+    buffer.add(_int16(1)); // PCM
+    buffer.add(_int16(numChannels));
+    buffer.add(_int32(sampleRate));
+    buffer.add(_int32(byteRate));
+    buffer.add(_int16(blockAlign));
+    buffer.add(_int16(bitsPerSample));
+    // data
     buffer.add('data'.codeUnits);
-    buffer.add(_int32ToBytes(subChunk2Size));
+    buffer.add(_int32(dataSize));
 
-    // Write samples (Convert Float32 -1.0..1.0 to Int16)
+    // Samples
     for (var sample in samples) {
-      // Clip to -1.0 to 1.0
-      if (sample > 1.0) sample = 1.0;
-      if (sample < -1.0) sample = -1.0;
-      
-      int val = (sample * 32767).toInt();
-      buffer.add(_int16ToBytes(val));
+      // Amplify volume slightly (x1.5) and clip
+      double s = sample * 1.5;
+      if (s > 1.0) s = 1.0;
+      if (s < -1.0) s = -1.0;
+      buffer.add(_int16((s * 32767).toInt()));
     }
 
     return buffer.toBytes();
   }
 
-  List<int> _int32ToBytes(int value) {
-    return Uint8List(4)..buffer.asByteData().setInt32(0, value, Endian.little);
-  }
-
-  List<int> _int16ToBytes(int value) {
-    return Uint8List(2)..buffer.asByteData().setInt16(0, value, Endian.little);
-  }
+  List<int> _int32(int v) => Uint8List(4)..buffer.asByteData().setInt32(0, v, Endian.little);
+  List<int> _int16(int v) => Uint8List(2)..buffer.asByteData().setInt16(0, v, Endian.little);
 
   @override
   void dispose() {
-    _recordSub?.cancel();
     _audioRecorder.dispose();
     _audioPlayer.dispose();
     _sttStream?.free();
@@ -352,55 +354,84 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Jarvis AI (Speaking)')),
+      backgroundColor: Colors.grey[100],
+      appBar: AppBar(
+        title: const Text('Jarvis AI'),
+        backgroundColor: Colors.blueAccent,
+        elevation: 0,
+      ),
       body: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(20),
         child: Column(
           children: [
-            Text(_statusText, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.blue)),
+            // Status Card
+            Container(
+              padding: const EdgeInsets.all(15),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(15),
+                boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 10)]
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline, color: Colors.blueAccent),
+                  SizedBox(width: 10),
+                  Expanded(child: Text(_statusText, style: TextStyle(fontWeight: FontWeight.bold))),
+                ],
+              ),
+            ),
             const SizedBox(height: 20),
+            
+            // Text Area
             Expanded(
-              child: TextField(
-                controller: _controller,
-                maxLines: null,
-                readOnly: true,
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                  hintText: 'Recognized text will appear here...',
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(15),
+                  border: Border.all(color: Colors.blueAccent.withOpacity(0.3))
+                ),
+                child: TextField(
+                  controller: _controller,
+                  maxLines: null,
+                  readOnly: true,
+                  style: TextStyle(fontSize: 18),
+                  decoration: const InputDecoration(
+                    border: InputBorder.none,
+                    contentPadding: EdgeInsets.all(20),
+                    hintText: 'Recognized text will appear here...',
+                  ),
                 ),
               ),
             ),
             const SizedBox(height: 30),
+            
+            // Mic Button
             GestureDetector(
-              onTap: () {
-                if (!_isInitialized) return;
-                (_recordState == RecordState.stop) ? _startRecording() : _stopRecording();
-              },
-              child: Container(
+              onTap: _toggleRecording,
+              child: AnimatedContainer(
+                duration: Duration(milliseconds: 300),
                 width: 80,
                 height: 80,
                 decoration: BoxDecoration(
-                  color: _recordState == RecordState.stop ? Colors.blue : Colors.red,
+                  color: _isRecording ? Colors.redAccent : Colors.blueAccent,
                   shape: BoxShape.circle,
                   boxShadow: [
-                     BoxShadow(color: Colors.black26, blurRadius: 10, spreadRadius: 2)
+                    BoxShadow(
+                      color: (_isRecording ? Colors.redAccent : Colors.blueAccent).withOpacity(0.4),
+                      blurRadius: 20,
+                      spreadRadius: 5
+                    )
                   ],
                 ),
                 child: Icon(
-                  _recordState == RecordState.stop ? Icons.mic : Icons.stop,
+                  _isRecording ? Icons.stop : Icons.mic,
                   color: Colors.white,
                   size: 40,
                 ),
               ),
             ),
-            const SizedBox(height: 20),
-            Text(
-              _recordState == RecordState.stop ? "Tap to Speak" : "Listening...",
-              style: TextStyle(
-                color: _recordState == RecordState.stop ? Colors.black : Colors.red,
-                fontSize: 18
-              ),
-            ),
+            SizedBox(height: 10),
+            Text(_isRecording ? "Listening..." : "Tap to Speak", style: TextStyle(color: Colors.grey[600])),
           ],
         ),
       ),
