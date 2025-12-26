@@ -1,6 +1,5 @@
 name: streaming_asr
-description: >
-  Sherpa ONNX Voice Assistant with Real-time STT and TTS.
+description: Sherpa ONNX Voice Assistant
 publish_to: 'none'
 version: 1.0.0
 
@@ -12,23 +11,16 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # Icons & Utilities
   cupertino_icons: ^1.0.6
   path_provider: ^2.1.3
   path: ^1.9.0
-  
-  # Audio Recording (Latest Stable)
-  record: ^5.2.0
-  # Note: Agar build error aaye to ise ^6.1.2 karein, par 5.2.0 is very stable.
-  
-  # Permissions
   permission_handler: ^11.3.1
+
+  # IMPORTANT: Using latest version to fix Linux build error
+  record: ^6.1.2
   
-  # AI Engine (Offline STT/TTS)
-  sherpa_onnx: ^1.12.20
-  
-  # Audio Player (To speak without lag)
   audioplayers: ^6.0.0
+  sherpa_onnx: ^1.12.20
 
 dev_dependencies:
   flutter_test:
@@ -39,15 +31,9 @@ flutter:
   uses-material-design: true
 
   assets:
-    # 1. STT Models (Microphone se sunne ke liye)
     - assets/tiny-encoder.int8.onnx
     - assets/tiny-decoder.int8.onnx
     - assets/tokens.txt
-    
-    # 2. TTS Models (Bolne ke liye - Pratham/Male)
     - assets/hi_IN-pratham-medium.onnx
     - assets/hi_IN-pratham-medium.onnx.json
-    
-    # 3. Espeak Data (Bahut Zaruri Folder)
-    # Dhyan dein: End mein '/' lagana zaruri hai
     - assets/espeak-ng-data/
