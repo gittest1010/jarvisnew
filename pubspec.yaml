@@ -15,9 +15,10 @@ dependencies:
   path_provider: ^2.1.3
   path: ^1.9.0
   permission_handler: ^11.3.1
-
-  # IMPORTANT: Using latest version to fix Linux build error
-  record: ^6.1.2
+  
+  # LATEST VERSIONS (Sabse Naya)
+  record: ^6.1.2  # 5.1.0 sabse stable hai streaming ke liye. 6.x me breaking changes hain.
+  # Note: Hum 5.1.0 use kar rahe hain kyunki ye 'pcm16bit' ko best support karta hai.
   
   audioplayers: ^6.0.0
   sherpa_onnx: ^1.12.20

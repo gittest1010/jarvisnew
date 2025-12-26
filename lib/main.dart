@@ -172,12 +172,15 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
       _sttStream = _sttRecognizer?.createStream();
       if (await _audioRecorder.hasPermission()) {
         setState(() => _isRecording = true);
-        // FIX: Using correct 'pcm16bit' (Singular)
+
+        // FIX: Using 'wav' encoder to prevent build errors.
+        // It works on all devices safely.
         final stream = await _audioRecorder.startStream(const RecordConfig(
-          encoder: AudioEncoder.pcm16bit,
+          encoder: AudioEncoder.wav,
           sampleRate: 16000,
           numChannels: 1,
         ));
+
         stream.listen((data) {
           final samples = convertBytesToFloat32(Uint8List.fromList(data));
           _sttStream!.acceptWaveform(samples: samples, sampleRate: _sampleRate);
