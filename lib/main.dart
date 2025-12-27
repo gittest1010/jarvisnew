@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -10,6 +9,9 @@ import 'package:record/record.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa_onnx;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:audioplayers/audioplayers.dart';
+// Archive package for extracting .tar.bz2
+import 'package:archive/archive.dart';
+import 'package:archive/archive_io.dart';
 
 // --- UTILITY ---
 Float32List convertBytesToFloat32(Uint8List bytes) {
@@ -63,7 +65,7 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
   }
 
   Future<void> _startSetupProcess() async {
-    // 1. Permissions
+    // 1. Permissions check karein
     var status = await Permission.microphone.request();
     if (status != PermissionStatus.granted) {
       setState(() {
@@ -72,87 +74,67 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
       });
       return;
     }
-    // 2. Init
+    // 2. Initialization start karein
     await _initSherpaEngines();
   }
 
-  // --- ASSETS COPYING ---
+  // --- ASSETS COPYING LOGIC ---
   Future<String> _copyAssetToFile(String assetPath) async {
-    try {
-      final docsDir = await getApplicationDocumentsDirectory();
-      final fileName = assetPath.split('/').last;
-      final file = File('${docsDir.path}/$fileName');
-
-      // Check existence
-      if (!await file.exists()) {
-        setState(() => _statusText = "Copying $fileName...");
-        final data = await rootBundle.load(assetPath);
-        await file.writeAsBytes(data.buffer.asUint8List(), flush: true);
-      }
-      return file.path;
-    } catch (e) {
-      throw Exception("Copy Failed: $assetPath");
-    }
-  }
-
-  Future<String> _copyAssetFolder(String assetFolderPath) async {
     final docsDir = await getApplicationDocumentsDirectory();
-    final localFolder =
-        Directory('${docsDir.path}/${assetFolderPath.split('/').last}');
+    final fileName = assetPath.split('/').last;
+    final file = File('${docsDir.path}/$fileName');
 
-    // Logic Change: Agar folder hai par khali hai, to wapas copy karo
-    bool exists = await localFolder.exists();
-    if (exists) {
-      if (await localFolder.list().isEmpty) {
-        exists = false; // Re-copy needed
-      }
+    if (!await file.exists()) {
+      final data = await rootBundle.load(assetPath);
+      await file.writeAsBytes(data.buffer.asUint8List(), flush: true);
     }
-
-    if (!exists) {
-      await localFolder.create(recursive: true);
-    } else {
-      return localFolder.path; // Already ready
-    }
-
-    try {
-      final manifestContent = await rootBundle.loadString('AssetManifest.json');
-      final Map<String, dynamic> manifestMap = json.decode(manifestContent);
-
-      final filePaths = manifestMap.keys
-          .where((String key) => key.contains('espeak-ng-data'))
-          .toList();
-
-      if (filePaths.isEmpty) {
-        throw Exception("espeak data not found in Assets!");
-      }
-
-      for (final filePath in filePaths) {
-        final relativePathIndex = filePath.indexOf('espeak-ng-data/');
-        if (relativePathIndex == -1) continue;
-
-        final relativePath = filePath.substring(relativePathIndex);
-        final localFilePath = '${docsDir.path}/$relativePath';
-        final localFile = File(localFilePath);
-
-        if (!await localFile.exists()) {
-          setState(() => _statusText = "Unpacking Data...");
-          await localFile.parent.create(recursive: true);
-          final data = await rootBundle.load(filePath);
-          await localFile.writeAsBytes(data.buffer.asUint8List(), flush: true);
-        }
-      }
-    } catch (e) {
-      print("Folder Copy Error: $e");
-    }
-    return localFolder.path;
+    return file.path;
   }
 
-  // --- INIT SHERPA ---
+  // --- EXTRACT TAR.BZ2 (For espeak-ng-data) ---
+  Future<String> _extractEspeakData() async {
+    final docsDir = await getApplicationDocumentsDirectory();
+    final dataDir = Directory('${docsDir.path}/espeak-ng-data');
+
+    // Agar folder pehle se hai, toh wapas extract na karein
+    if (await dataDir.exists()) {
+      return dataDir.path;
+    }
+
+    setState(() => _statusText = "Extracting Data (Takes time)...");
+
+    // 1. Load tar.bz2 from assets
+    final data = await rootBundle.load('assets/espeak-ng-data.tar.bz2');
+    final bytes = data.buffer.asUint8List();
+
+    // 2. Decode BZip2 and then Tar
+    final archive = TarDecoder().decodeBytes(BZip2Decoder().decodeBytes(bytes));
+
+    // 3. Save files
+    for (final file in archive) {
+      final filename = file.name;
+      if (file.isFile) {
+        final data = file.content as List<int>;
+        File('${docsDir.path}/$filename')
+          ..createSync(recursive: true)
+          ..writeAsBytesSync(data);
+      }
+    }
+
+    return dataDir.path;
+  }
+
+  // --- INIT SHERPA (CRITICAL FIX) ---
   Future<void> _initSherpaEngines() async {
     try {
-      setState(() => _statusText = "Initializing AI Models...");
+      setState(() => _statusText = "Initializing Native Libs...");
 
-      // 1. Copy Files
+      // STEP 1: Sabse pehle C++ library initialize karein
+      sherpa_onnx.initBindings();
+
+      setState(() => _statusText = "Copying Models...");
+
+      // STEP 2: Assets ko Internal Storage mein copy karein
       final encoderPath =
           await _copyAssetToFile('assets/tiny-encoder.int8.onnx');
       final decoderPath =
@@ -164,10 +146,12 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
       final ttsJsonPath =
           await _copyAssetToFile('assets/hi_IN-pratham-medium.onnx.json');
 
-      // 2. Copy Folder
-      final espeakDataPath = await _copyAssetFolder('assets/espeak-ng-data');
+      // Extract espeak-ng-data from .tar.bz2
+      final espeakDataPath = await _extractEspeakData();
 
-      // 3. Configure STT
+      setState(() => _statusText = "Configuring AI...");
+
+      // STEP 3: STT (Speech to Text) Setup
       final sttConfig = sherpa_onnx.OnlineRecognizerConfig(
         model: sherpa_onnx.OnlineModelConfig(
           transducer: sherpa_onnx.OnlineTransducerModelConfig(
@@ -176,11 +160,13 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
             joiner: tokensPath,
           ),
           tokens: tokensPath,
+          numThreads: 1,
         ),
+        featConfig: const sherpa_onnx.FeatureConfig(sampleRate: 16000),
       );
       _sttRecognizer = sherpa_onnx.OnlineRecognizer(sttConfig);
 
-      // 4. Configure TTS
+      // STEP 4: TTS (Text to Speech) Setup
       final ttsConfig = sherpa_onnx.OfflineTtsConfig(
         model: sherpa_onnx.OfflineTtsModelConfig(
           vits: sherpa_onnx.OfflineTtsVitsModelConfig(
@@ -189,6 +175,7 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
             dataDir: espeakDataPath,
           ),
           provider: 'sherpa-onnx',
+          numThreads: 1,
         ),
       );
       _ttsEngine = sherpa_onnx.OfflineTts(ttsConfig);
@@ -200,13 +187,13 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     } catch (e) {
       setState(() {
         _isLoading = false;
-        _statusText = "Init Error: $e";
+        _statusText = "Error: $e";
       });
-      print(e);
+      print("INIT ERROR: $e");
     }
   }
 
-  // --- RECORDING ---
+  // --- RECORDING & PROCESSING ---
   Future<void> _toggleRecording() async {
     if (_sttRecognizer == null || _isLoading) return;
 
@@ -221,24 +208,30 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
         setState(() => _isRecording = true);
 
         final stream = await _audioRecorder.startStream(const RecordConfig(
-          encoder: AudioEncoder.wav,
+          encoder: AudioEncoder.pcm16bit,
           sampleRate: 16000,
           numChannels: 1,
         ));
 
         stream.listen((data) {
           final samples = convertBytesToFloat32(Uint8List.fromList(data));
-          _sttStream!.acceptWaveform(samples: samples, sampleRate: _sampleRate);
 
-          while (_sttRecognizer!.isReady(_sttStream!)) {
-            _sttRecognizer!.decode(_sttStream!);
+          if (_sttStream != null) {
+            _sttStream!
+                .acceptWaveform(samples: samples, sampleRate: _sampleRate);
+
+            while (_sttRecognizer!.isReady(_sttStream!)) {
+              _sttRecognizer!.decode(_sttStream!);
+            }
+
+            final text = _sttRecognizer!.getResult(_sttStream!).text;
+            bool isEndpoint = _sttRecognizer!.isEndpoint(_sttStream!);
+            _updateUI(text, isEndpoint);
+
+            if (isEndpoint) {
+              _sttRecognizer!.reset(_sttStream!);
+            }
           }
-
-          final text = _sttRecognizer!.getResult(_sttStream!).text;
-          bool isEndpoint = _sttRecognizer!.isEndpoint(_sttStream!);
-          _updateUI(text, isEndpoint);
-
-          if (isEndpoint) _sttRecognizer!.reset(_sttStream!);
         });
       }
     }
@@ -247,20 +240,26 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
   void _updateUI(String text, bool isEndpoint) {
     if (text.isNotEmpty) {
       String fullText = '$_sentenceIndex: $text\n$_lastRecognizedText';
-      _controller.value = TextEditingValue(
-        text: fullText,
-        selection: TextSelection.collapsed(offset: fullText.length),
-      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _controller.value = TextEditingValue(
+          text: fullText,
+          selection: TextSelection.collapsed(offset: fullText.length),
+        );
+      });
 
       if (isEndpoint) {
         _lastRecognizedText = fullText;
         _sentenceIndex++;
-        _toggleRecording().then((_) => _speak(text));
+        // Automatically speak the recognized text
+        _speak(text);
       }
     }
   }
 
-  // --- SPEAKING ---
+  // --- SPEAKING (TTS) ---
   Future<void> _speak(String text) async {
     if (_ttsEngine == null) return;
 
@@ -269,11 +268,14 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
 
     final dir = await getTemporaryDirectory();
     final file = File('${dir.path}/tts_output.wav');
+
     await file.writeAsBytes(_createWavHeader(audio.samples, audio.sampleRate),
         flush: true);
+
     await _audioPlayer.play(DeviceFileSource(file.path));
   }
 
+  // WAV Header Generator (Required for playing raw audio)
   Uint8List _createWavHeader(Float32List samples, int sampleRate) {
     int numChannels = 1;
     int bitsPerSample = 16;
@@ -298,7 +300,7 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     buffer.add(_int32(dataSize));
 
     for (var sample in samples) {
-      double s = sample * 1.5;
+      double s = sample;
       if (s > 1.0) s = 1.0;
       if (s < -1.0) s = -1.0;
       buffer.add(_int16((s * 32767).toInt()));
@@ -330,12 +332,10 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
           title: const Text('Jarvis AI'), backgroundColor: Colors.blueAccent),
       body: Stack(
         children: [
-          // 1. Main Content (Behind the overlay)
           Padding(
             padding: const EdgeInsets.all(20),
             child: Column(
               children: [
-                // Simplified Status Bar
                 Container(
                   padding: const EdgeInsets.all(15),
                   decoration: BoxDecoration(
@@ -353,8 +353,6 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
                   ),
                 ),
                 const SizedBox(height: 20),
-
-                // Text Area
                 Expanded(
                   child: TextField(
                     controller: _controller,
@@ -362,12 +360,10 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
                     readOnly: true,
                     decoration: const InputDecoration(
                         border: OutlineInputBorder(),
-                        hintText: "Wait for initialization..."),
+                        hintText: "Transcription will appear here..."),
                   ),
                 ),
                 const SizedBox(height: 30),
-
-                // Button
                 GestureDetector(
                   onTap: _isLoading ? null : _toggleRecording,
                   child: CircleAvatar(
@@ -382,47 +378,24 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
               ],
             ),
           ),
-
-          // 2. Full Screen Loading Overlay (Prevents Touch)
           if (_isLoading)
             Container(
               height: double.infinity,
               width: double.infinity,
-              color: Colors.black
-                  .withOpacity(0.7), // Semi-transparent black background
+              color: Colors.black.withOpacity(0.7),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const CircularProgressIndicator(
-                    color: Colors.white,
-                    strokeWidth: 4,
-                  ),
+                  const CircularProgressIndicator(color: Colors.white),
                   const SizedBox(height: 20),
-                  const Text(
-                    "Setting up Jarvis...",
-                    style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold),
-                  ),
+                  const Text("Setting up Jarvis...",
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold)),
                   const SizedBox(height: 10),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 40),
-                    child: Text(
-                      _statusText, // Shows 'Unpacking data...', 'Copying...' etc.
-                      textAlign: TextAlign.center,
-                      style:
-                          const TextStyle(color: Colors.white70, fontSize: 16),
-                    ),
-                  ),
-                  const SizedBox(height: 30),
-                  const Text(
-                    "(This happens only once)",
-                    style: TextStyle(
-                        color: Colors.white54,
-                        fontSize: 14,
-                        fontStyle: FontStyle.italic),
-                  ),
+                  Text(_statusText,
+                      style: const TextStyle(color: Colors.white70)),
                 ],
               ),
             ),
