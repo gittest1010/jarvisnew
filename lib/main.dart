@@ -47,8 +47,11 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
   late final AudioRecorder _audioRecorder;
   late final AudioPlayer _audioPlayer;
 
+  // STT: Streaming Recognizer (Runs locally)
   sherpa_onnx.OnlineRecognizer? _sttRecognizer;
   sherpa_onnx.OnlineStream? _sttStream;
+
+  // TTS: Offline Engine (Runs locally)
   sherpa_onnx.OfflineTts? _ttsEngine;
 
   bool _isRecording = false;
@@ -65,7 +68,7 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
   }
 
   Future<void> _startSetupProcess() async {
-    // 1. Permissions check karein
+    // 1. Permissions check
     var status = await Permission.microphone.request();
     if (status != PermissionStatus.granted) {
       setState(() {
@@ -74,7 +77,7 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
       });
       return;
     }
-    // 2. Initialization start karein
+    // 2. Start Initialization
     await _initSherpaEngines();
   }
 
@@ -91,26 +94,22 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     return file.path;
   }
 
-  // --- EXTRACT TAR.BZ2 (For espeak-ng-data) ---
+  // --- EXTRACT TAR.BZ2 (For Offline TTS Data) ---
   Future<String> _extractEspeakData() async {
     final docsDir = await getApplicationDocumentsDirectory();
     final dataDir = Directory('${docsDir.path}/espeak-ng-data');
 
-    // Agar folder pehle se hai, toh wapas extract na karein
     if (await dataDir.exists()) {
       return dataDir.path;
     }
 
-    setState(() => _statusText = "Extracting Data (Takes time)...");
+    setState(() => _statusText = "Extracting Offline TTS Data...");
 
-    // 1. Load tar.bz2 from assets
     final data = await rootBundle.load('assets/espeak-ng-data.tar.bz2');
     final bytes = data.buffer.asUint8List();
 
-    // 2. Decode BZip2 and then Tar
     final archive = TarDecoder().decodeBytes(BZip2Decoder().decodeBytes(bytes));
 
-    // 3. Save files
     for (final file in archive) {
       final filename = file.name;
       if (file.isFile) {
@@ -124,17 +123,17 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     return dataDir.path;
   }
 
-  // --- INIT SHERPA (CRITICAL FIX) ---
+  // --- INIT SHERPA (OFFLINE SETUP) ---
   Future<void> _initSherpaEngines() async {
     try {
       setState(() => _statusText = "Initializing Native Libs...");
 
-      // STEP 1: Sabse pehle C++ library initialize karein
+      // STEP 1: Load C++ Libraries
       sherpa_onnx.initBindings();
 
       setState(() => _statusText = "Copying Models...");
 
-      // STEP 2: Assets ko Internal Storage mein copy karein
+      // STEP 2: Copy Assets to Internal Storage
       final encoderPath =
           await _copyAssetToFile('assets/tiny-encoder.int8.onnx');
       final decoderPath =
@@ -146,12 +145,11 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
       final ttsJsonPath =
           await _copyAssetToFile('assets/hi_IN-pratham-medium.onnx.json');
 
-      // Extract espeak-ng-data from .tar.bz2
       final espeakDataPath = await _extractEspeakData();
 
       setState(() => _statusText = "Configuring AI...");
 
-      // STEP 3: STT (Speech to Text) Setup
+      // STEP 3: STT (Speech to Text) Setup - Streaming but Local
       final sttConfig = sherpa_onnx.OnlineRecognizerConfig(
         model: sherpa_onnx.OnlineModelConfig(
           transducer: sherpa_onnx.OnlineTransducerModelConfig(
@@ -162,17 +160,16 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
           tokens: tokensPath,
           numThreads: 1,
         ),
-        featConfig: const sherpa_onnx.FeatureConfig(sampleRate: 16000),
       );
       _sttRecognizer = sherpa_onnx.OnlineRecognizer(sttConfig);
 
-      // STEP 4: TTS (Text to Speech) Setup
+      // STEP 4: TTS (Text to Speech) Setup - STRICTLY OFFLINE
       final ttsConfig = sherpa_onnx.OfflineTtsConfig(
         model: sherpa_onnx.OfflineTtsModelConfig(
           vits: sherpa_onnx.OfflineTtsVitsModelConfig(
-            model: ttsModelPath,
-            tokens: ttsJsonPath,
-            dataDir: espeakDataPath,
+            model: ttsModelPath, // Local ONNX model
+            tokens: ttsJsonPath, // Local tokens
+            dataDir: espeakDataPath, // Local espeak-ng-data
           ),
           provider: 'sherpa-onnx',
           numThreads: 1,
@@ -182,7 +179,7 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
 
       setState(() {
         _isLoading = false;
-        _statusText = "Jarvis Ready. Tap Mic 🎙️";
+        _statusText = "Jarvis Ready (Offline). Tap Mic 🎙️";
       });
     } catch (e) {
       setState(() {
@@ -208,7 +205,7 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
         setState(() => _isRecording = true);
 
         final stream = await _audioRecorder.startStream(const RecordConfig(
-          encoder: AudioEncoder.pcm16bit,
+          encoder: AudioEncoder.wav, // Ensure WAV format for compatibility
           sampleRate: 16000,
           numChannels: 1,
         ));
@@ -253,16 +250,16 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
       if (isEndpoint) {
         _lastRecognizedText = fullText;
         _sentenceIndex++;
-        // Automatically speak the recognized text
         _speak(text);
       }
     }
   }
 
-  // --- SPEAKING (TTS) ---
+  // --- SPEAKING (OFFLINE TTS) ---
   Future<void> _speak(String text) async {
     if (_ttsEngine == null) return;
 
+    // Generates audio locally on device
     final audio = _ttsEngine!.generate(text: text, sid: 0, speed: 1.0);
     if (audio.samples.isEmpty) return;
 
@@ -275,7 +272,7 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     await _audioPlayer.play(DeviceFileSource(file.path));
   }
 
-  // WAV Header Generator (Required for playing raw audio)
+  // WAV Header Generator
   Uint8List _createWavHeader(Float32List samples, int sampleRate) {
     int numChannels = 1;
     int bitsPerSample = 16;
@@ -329,7 +326,8 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
-          title: const Text('Jarvis AI'), backgroundColor: Colors.blueAccent),
+          title: const Text('Jarvis AI (Offline)'),
+          backgroundColor: Colors.blueAccent),
       body: Stack(
         children: [
           Padding(
