@@ -18,7 +18,7 @@ dependencies:
   permission_handler: ^11.3.1
   
   # Core Logic
-  record: ^5.1.0  # Stable version for wav recording
+  record: ^6.1.2  # Stable version for wav recording
   audioplayers: ^6.0.0
   sherpa_onnx: ^1.12.20
   
