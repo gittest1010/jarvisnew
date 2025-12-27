@@ -11,15 +11,19 @@ dependencies:
   flutter:
     sdk: flutter
 
+  # Icons & Utils
   cupertino_icons: ^1.0.6
   path_provider: ^2.1.3
   path: ^1.9.0
   permission_handler: ^11.3.1
   
-  # Stable Packages
-  record: ^6.1.2
+  # Core Logic
+  record: ^5.1.0  # Stable version for wav recording
   audioplayers: ^6.0.0
   sherpa_onnx: ^1.12.20
+  
+  # NEW: Zip file extract karne ke liye
+  archive: ^3.3.7
 
 dev_dependencies:
   flutter_test:
@@ -30,16 +34,14 @@ flutter:
   uses-material-design: true
 
   assets:
+    # STT Models
     - assets/tiny-encoder.int8.onnx
     - assets/tiny-decoder.int8.onnx
     - assets/tokens.txt
     
+    # TTS Models
     - assets/hi_IN-pratham-medium.onnx
     - assets/hi_IN-pratham-medium.onnx.json
     
-    # --- FIXED ASSETS STRUCTURE ---
-    # Flutter sub-folders ko automatic nahi uthata, isliye alag se likhna padta hai
-    - assets/espeak-ng-data/
-    - assets/espeak-ng-data/lang/
-    - assets/espeak-ng-data/voices/
-    - assets/espeak-ng-data/dictsource/
+    # NEW: Zip File (Folder ki jagah ye use karenge)
+    - assets/espeak-ng-data.tar.bz2
