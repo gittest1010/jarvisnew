@@ -11,19 +11,19 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # Icons & Utils
-  cupertino_icons: ^1.0.6
-  path_provider: ^2.1.3
-  path: ^1.9.0
-  permission_handler: ^11.3.1
+  # Utils
+  path_provider: ^2.1.2
+  permission_handler: ^11.3.0
   
-  # Core Logic
-  record: ^6.1.2  # Stable version for wav recording
+  # Audio
+  record: ^6.1.2        # Stable version (AudioEncoder.wav support)
   audioplayers: ^6.0.0
-  sherpa_onnx: ^1.12.20
   
-  # NEW: Zip file extract karne ke liye
-  archive: ^3.3.7
+  # AI Core
+  sherpa_onnx: ^1.12.20 # Latest official
+  
+  # Zip Extract Karne ke liye (Important)
+  archive: ^3.6.1
 
 dev_dependencies:
   flutter_test:
@@ -34,14 +34,15 @@ flutter:
   uses-material-design: true
 
   assets:
-    # STT Models
+    # 1. STT Models
     - assets/tiny-encoder.int8.onnx
     - assets/tiny-decoder.int8.onnx
     - assets/tokens.txt
     
-    # TTS Models
+    # 2. TTS Models
     - assets/hi_IN-pratham-medium.onnx
     - assets/hi_IN-pratham-medium.onnx.json
     
-    # NEW: Zip File (Folder ki jagah ye use karenge)
+    # 3. TTS Data (Zip File Only)
+    # Folder mat use karna, files missing ho jati hain.
     - assets/espeak-ng-data.tar.bz2

@@ -9,11 +9,11 @@ import 'package:record/record.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa_onnx;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:audioplayers/audioplayers.dart';
-// Archive package for extracting .tar.bz2
+// Archive package for Zip extraction
 import 'package:archive/archive.dart';
 import 'package:archive/archive_io.dart';
 
-// --- UTILITY ---
+// --- HELPER: Bytes to Float32 ---
 Float32List convertBytesToFloat32(Uint8List bytes) {
   final int length = bytes.length ~/ 2;
   final Float32List float32List = Float32List(length);
@@ -29,29 +29,27 @@ Float32List convertBytesToFloat32(Uint8List bytes) {
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const MaterialApp(
-      debugShowCheckedModeBanner: false, home: VoiceAssistantScreen()));
+      debugShowCheckedModeBanner: false, home: JarvisScreen()));
 }
 
-class VoiceAssistantScreen extends StatefulWidget {
-  const VoiceAssistantScreen({super.key});
+class JarvisScreen extends StatefulWidget {
+  const JarvisScreen({super.key});
 
   @override
-  State<VoiceAssistantScreen> createState() => _VoiceAssistantScreenState();
+  State<JarvisScreen> createState() => _JarvisScreenState();
 }
 
-class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
+class _JarvisScreenState extends State<JarvisScreen> {
   final TextEditingController _controller = TextEditingController();
-  String _statusText = "Starting...";
+  String _statusText = "Initializing...";
   bool _isLoading = true;
 
   late final AudioRecorder _audioRecorder;
   late final AudioPlayer _audioPlayer;
 
-  // STT: Streaming Recognizer (Runs locally)
+  // Sherpa Engines
   sherpa_onnx.OnlineRecognizer? _sttRecognizer;
   sherpa_onnx.OnlineStream? _sttStream;
-
-  // TTS: Offline Engine (Runs locally)
   sherpa_onnx.OfflineTts? _ttsEngine;
 
   bool _isRecording = false;
@@ -64,11 +62,13 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     super.initState();
     _audioRecorder = AudioRecorder();
     _audioPlayer = AudioPlayer();
-    _startSetupProcess();
+
+    // App start hote hi setup shuru karein
+    _startSetup();
   }
 
-  Future<void> _startSetupProcess() async {
-    // 1. Permissions check
+  Future<void> _startSetup() async {
+    // Step 1: Mic Permission
     var status = await Permission.microphone.request();
     if (status != PermissionStatus.granted) {
       setState(() {
@@ -77,16 +77,18 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
       });
       return;
     }
-    // 2. Start Initialization
-    await _initSherpaEngines();
+
+    // Step 2: Initialize Sherpa
+    await _initJarvis();
   }
 
-  // --- ASSETS COPYING LOGIC ---
-  Future<String> _copyAssetToFile(String assetPath) async {
+  // --- ASSET HELPER 1: COPY SINGLE FILE ---
+  Future<String> _copyAsset(String assetPath) async {
     final docsDir = await getApplicationDocumentsDirectory();
     final fileName = assetPath.split('/').last;
     final file = File('${docsDir.path}/$fileName');
 
+    // Agar file pehle se hai to copy mat karo (Time bachega)
     if (!await file.exists()) {
       final data = await rootBundle.load(assetPath);
       await file.writeAsBytes(data.buffer.asUint8List(), flush: true);
@@ -94,62 +96,69 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     return file.path;
   }
 
-  // --- EXTRACT TAR.BZ2 (For Offline TTS Data) ---
+  // --- ASSET HELPER 2: EXTRACT ZIP (OFFICIAL WAY) ---
   Future<String> _extractEspeakData() async {
     final docsDir = await getApplicationDocumentsDirectory();
     final dataDir = Directory('${docsDir.path}/espeak-ng-data');
 
+    // Check agar folder pehle se ready hai
     if (await dataDir.exists()) {
       return dataDir.path;
     }
 
-    setState(() => _statusText = "Extracting Offline TTS Data...");
+    setState(() => _statusText = "Extracting Voice Data...");
 
-    final data = await rootBundle.load('assets/espeak-ng-data.tar.bz2');
-    final bytes = data.buffer.asUint8List();
+    try {
+      // 1. Zip file load karo asset se
+      final data = await rootBundle.load('assets/espeak-ng-data.tar.bz2');
+      final bytes = data.buffer.asUint8List();
 
-    final archive = TarDecoder().decodeBytes(BZip2Decoder().decodeBytes(bytes));
+      // 2. Decode karo (BZip2 -> Tar)
+      final archive =
+          TarDecoder().decodeBytes(BZip2Decoder().decodeBytes(bytes));
 
-    for (final file in archive) {
-      final filename = file.name;
-      if (file.isFile) {
-        final data = file.content as List<int>;
-        File('${docsDir.path}/$filename')
-          ..createSync(recursive: true)
-          ..writeAsBytesSync(data);
+      // 3. Files save karo
+      for (final file in archive) {
+        final filename = file.name;
+        if (file.isFile) {
+          final data = file.content as List<int>;
+          File('${docsDir.path}/$filename')
+            ..createSync(recursive: true)
+            ..writeAsBytesSync(data);
+        }
       }
+      return dataDir.path;
+    } catch (e) {
+      throw Exception("Failed to extract Zip: $e");
     }
-
-    return dataDir.path;
   }
 
-  // --- INIT SHERPA (OFFLINE SETUP) ---
-  Future<void> _initSherpaEngines() async {
+  // --- MAIN INIT LOGIC (CRITICAL) ---
+  Future<void> _initJarvis() async {
     try {
-      setState(() => _statusText = "Initializing Native Libs...");
+      setState(() => _statusText = "Loading Core...");
 
-      // STEP 1: Load C++ Libraries
+      // 🔥 FIX 1: SABSE PEHLE BINDINGS INIT KARO
+      // Ye line "Please initialize first" error ko rokegi.
       sherpa_onnx.initBindings();
 
       setState(() => _statusText = "Copying Models...");
 
-      // STEP 2: Copy Assets to Internal Storage
-      final encoderPath =
-          await _copyAssetToFile('assets/tiny-encoder.int8.onnx');
-      final decoderPath =
-          await _copyAssetToFile('assets/tiny-decoder.int8.onnx');
-      final tokensPath = await _copyAssetToFile('assets/tokens.txt');
+      // 🔥 FIX 2: FILES COPY KARO (AWAIT KE SATH)
+      final encoderPath = await _copyAsset('assets/tiny-encoder.int8.onnx');
+      final decoderPath = await _copyAsset('assets/tiny-decoder.int8.onnx');
+      final tokensPath = await _copyAsset('assets/tokens.txt');
 
-      final ttsModelPath =
-          await _copyAssetToFile('assets/hi_IN-pratham-medium.onnx');
+      final ttsModelPath = await _copyAsset('assets/hi_IN-pratham-medium.onnx');
       final ttsJsonPath =
-          await _copyAssetToFile('assets/hi_IN-pratham-medium.onnx.json');
+          await _copyAsset('assets/hi_IN-pratham-medium.onnx.json');
 
+      // Zip Extract karo
       final espeakDataPath = await _extractEspeakData();
 
-      setState(() => _statusText = "Configuring AI...");
+      setState(() => _statusText = "Starting AI Engine...");
 
-      // STEP 3: STT (Speech to Text) Setup - Streaming but Local
+      // Step 3: STT (Listening) Setup
       final sttConfig = sherpa_onnx.OnlineRecognizerConfig(
         model: sherpa_onnx.OnlineModelConfig(
           transducer: sherpa_onnx.OnlineTransducerModelConfig(
@@ -163,13 +172,13 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
       );
       _sttRecognizer = sherpa_onnx.OnlineRecognizer(sttConfig);
 
-      // STEP 4: TTS (Text to Speech) Setup - STRICTLY OFFLINE
+      // Step 4: TTS (Speaking) Setup
       final ttsConfig = sherpa_onnx.OfflineTtsConfig(
         model: sherpa_onnx.OfflineTtsModelConfig(
           vits: sherpa_onnx.OfflineTtsVitsModelConfig(
-            model: ttsModelPath, // Local ONNX model
-            tokens: ttsJsonPath, // Local tokens
-            dataDir: espeakDataPath, // Local espeak-ng-data
+            model: ttsModelPath,
+            tokens: ttsJsonPath,
+            dataDir: espeakDataPath, // Extracted folder path
           ),
           provider: 'sherpa-onnx',
           numThreads: 1,
@@ -177,20 +186,21 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
       );
       _ttsEngine = sherpa_onnx.OfflineTts(ttsConfig);
 
+      // Sab ready hai!
       setState(() {
         _isLoading = false;
-        _statusText = "Jarvis Ready (Offline). Tap Mic 🎙️";
+        _statusText = "Jarvis Ready. Tap Mic 🎙️";
       });
     } catch (e) {
       setState(() {
         _isLoading = false;
         _statusText = "Error: $e";
       });
-      print("INIT ERROR: $e");
+      print("CRITICAL ERROR: $e");
     }
   }
 
-  // --- RECORDING & PROCESSING ---
+  // --- RECORDING LOGIC ---
   Future<void> _toggleRecording() async {
     if (_sttRecognizer == null || _isLoading) return;
 
@@ -198,14 +208,16 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
       await _audioRecorder.stop();
       setState(() => _isRecording = false);
     } else {
+      // Stream reset karo
       _sttStream?.free();
       _sttStream = _sttRecognizer?.createStream();
 
       if (await _audioRecorder.hasPermission()) {
         setState(() => _isRecording = true);
 
+        // Recording start karo (WAV format me)
         final stream = await _audioRecorder.startStream(const RecordConfig(
-          encoder: AudioEncoder.wav, // Ensure WAV format for compatibility
+          encoder: AudioEncoder.wav,
           sampleRate: 16000,
           numChannels: 1,
         ));
@@ -255,14 +267,15 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     }
   }
 
-  // --- SPEAKING (OFFLINE TTS) ---
+  // --- TTS LOGIC ---
   Future<void> _speak(String text) async {
     if (_ttsEngine == null) return;
 
-    // Generates audio locally on device
+    // Audio Generate karo
     final audio = _ttsEngine!.generate(text: text, sid: 0, speed: 1.0);
     if (audio.samples.isEmpty) return;
 
+    // File save karke play karo
     final dir = await getTemporaryDirectory();
     final file = File('${dir.path}/tts_output.wav');
 
@@ -272,7 +285,7 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     await _audioPlayer.play(DeviceFileSource(file.path));
   }
 
-  // WAV Header Generator
+  // Helper: Create WAV Header (Required for raw PCM)
   Uint8List _createWavHeader(Float32List samples, int sampleRate) {
     int numChannels = 1;
     int bitsPerSample = 16;
@@ -326,8 +339,7 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
-          title: const Text('Jarvis AI (Offline)'),
-          backgroundColor: Colors.blueAccent),
+          title: const Text('Jarvis AI'), backgroundColor: Colors.blueAccent),
       body: Stack(
         children: [
           Padding(
@@ -357,8 +369,7 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
                     maxLines: null,
                     readOnly: true,
                     decoration: const InputDecoration(
-                        border: OutlineInputBorder(),
-                        hintText: "Transcription will appear here..."),
+                        border: OutlineInputBorder(), hintText: "Listening..."),
                   ),
                 ),
                 const SizedBox(height: 30),
@@ -394,6 +405,9 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
                   const SizedBox(height: 10),
                   Text(_statusText,
                       style: const TextStyle(color: Colors.white70)),
+                  const SizedBox(height: 20),
+                  const Text("(First time setup takes 10-20 seconds)",
+                      style: TextStyle(color: Colors.white30, fontSize: 12)),
                 ],
               ),
             ),
