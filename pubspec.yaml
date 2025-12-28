@@ -16,32 +16,26 @@ dependencies:
   permission_handler: ^11.3.1
   path: ^1.9.0
   
-  # Official Example Dependencies (Added from official code)
-  # Latest version as of Dec 2025
-  url_launcher: ^6.3.2
-  # Note: Linux specific launcher removed as we are targeting Android/Mobile generally, 
-  # but base url_launcher handles it.
-
+  # Official Example Dependencies
+  # Latest stable versions
+  url_launcher: ^6.3.1
+  
   # --- AUDIO RECORDING ---
-  # Specific version as requested
   record: ^6.1.2
 
   # --- AUDIO PLAYBACK ---
-  # Latest version
   audioplayers: ^6.5.1
   
-  # --- MEDIA KIT (Required for Official Isolate TTS) ---
-  # These were present in the official yaml you uploaded
-  # Using latest stable versions
+  # --- MEDIA KIT ---
+  # Corrected latest stable versions as of Dec 2025
   media_kit: ^1.2.6
-  media_kit_libs_video: ^2.0.1
+  # media_kit_libs_video version 1.0.7 is the latest stable that pairs with media_kit
+  media_kit_libs_video: ^1.0.7
 
   # --- AI CORE ---
-  # Latest version
   sherpa_onnx: ^1.12.20
   
   # --- ZIP EXTRACTION ---
-  # Necessary for extracting espeak-ng-data.tar.bz2
   archive: ^4.0.0
 
 dev_dependencies:
@@ -53,14 +47,14 @@ flutter:
   uses-material-design: true
 
   assets:
-    # 1. STT Models (Speech-to-Text)
+    # 1. STT Models
     - assets/tiny-encoder.int8.onnx
     - assets/tiny-decoder.int8.onnx
     - assets/tokens.txt
     
-    # 2. TTS Models (Text-to-Speech)
+    # 2. TTS Models
     - assets/hi_IN-pratham-medium.onnx
     - assets/hi_IN-pratham-medium.onnx.json
     
-    # 3. TTS Data (Official Zip Method)
+    # 3. TTS Data
     - assets/espeak-ng-data.tar.bz2
