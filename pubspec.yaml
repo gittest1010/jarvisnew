@@ -1,5 +1,5 @@
 name: streaming_asr
-description: Sherpa ONNX Voice Assistant
+description: Sherpa ONNX Voice Assistant with Official Integration
 publish_to: 'none'
 version: 1.0.0
 
@@ -11,38 +11,56 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # Utils
-  path_provider: ^2.1.2
-  permission_handler: ^11.3.0
+  # --- UTILITIES ---
+  path_provider: ^2.1.5
+  permission_handler: ^11.3.1
+  path: ^1.9.0
   
-  # Audio
-  record: ^6.1.2        # Stable version (AudioEncoder.wav support)
-  audioplayers: ^6.0.0
+  # Official Example Dependencies (Added from official code)
+  # Latest version as of Dec 2025
+  url_launcher: ^6.3.2
+  # Note: Linux specific launcher removed as we are targeting Android/Mobile generally, 
+  # but base url_launcher handles it.
+
+  # --- AUDIO RECORDING ---
+  # Specific version as requested
+  record: ^6.1.2
+
+  # --- AUDIO PLAYBACK ---
+  # Latest version
+  audioplayers: ^6.5.1
   
-  # AI Core
-  sherpa_onnx: ^1.12.20 # Latest official
+  # --- MEDIA KIT (Required for Official Isolate TTS) ---
+  # These were present in the official yaml you uploaded
+  # Using latest stable versions
+  media_kit: ^1.2.6
+  media_kit_libs_video: ^2.0.1
+
+  # --- AI CORE ---
+  # Latest version
+  sherpa_onnx: ^1.12.20
   
-  # Zip Extract Karne ke liye (Important)
-  archive: ^3.6.1
+  # --- ZIP EXTRACTION ---
+  # Necessary for extracting espeak-ng-data.tar.bz2
+  archive: ^4.0.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^3.0.0
+  flutter_lints: ^5.0.0
 
 flutter:
   uses-material-design: true
 
   assets:
-    # 1. STT Models
+    # 1. STT Models (Speech-to-Text)
     - assets/tiny-encoder.int8.onnx
     - assets/tiny-decoder.int8.onnx
     - assets/tokens.txt
     
-    # 2. TTS Models
+    # 2. TTS Models (Text-to-Speech)
     - assets/hi_IN-pratham-medium.onnx
     - assets/hi_IN-pratham-medium.onnx.json
     
-    # 3. TTS Data (Zip File Only)
-    # Folder mat use karna, files missing ho jati hain.
+    # 3. TTS Data (Official Zip Method)
     - assets/espeak-ng-data.tar.bz2
