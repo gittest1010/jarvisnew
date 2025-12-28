@@ -4,7 +4,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle, ByteData;
+import 'package:flutter/services.dart'; // Correct import for AssetManifest
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa_onnx;
@@ -17,10 +17,9 @@ import 'package:archive/archive.dart';
 import 'package:archive/archive_io.dart';
 
 // ============================================================
-// OFFICIAL UTILS CODE (Integrated from utils.dart)
+// OFFICIAL UTILS CODE (Integrated & Fixed)
 // ============================================================
 
-// https://stackoverflow.com/questions/68862225/flutter-how-to-get-all-files-from-assets-folder-in-one-list
 Future<List<String>> getAllAssetFiles() async {
   final AssetManifest assetManifest =
       await AssetManifest.loadFromAssetBundle(rootBundle);
@@ -29,38 +28,59 @@ Future<List<String>> getAllAssetFiles() async {
 }
 
 String stripLeadingDirectory(String src, {int n = 1}) {
-  return p.joinAll(p.split(src).sublist(n));
+  // Robust check to prevent errors if path is too short
+  final parts = p.split(src);
+  if (parts.length <= n) {
+    return p.basename(src);
+  }
+  return p.joinAll(parts.sublist(n));
 }
 
 Future<void> copyAllAssetFiles() async {
   final allFiles = await getAllAssetFiles();
   for (final src in allFiles) {
-    // Note: We might need to adjust stripping based on your asset structure
-    // If assets are in 'assets/models/file', strip 1 makes it 'models/file'
-    // If assets are just 'assets/file', strip 1 makes it 'file'
-    final dst = stripLeadingDirectory(src);
+    // Determine destination path properly
+    // assets/tiny-encoder.onnx -> tiny-encoder.onnx
+    // assets/espeak-ng-data/lang/en -> espeak-ng-data/lang/en
+    String dst;
+    if (src.startsWith('assets/')) {
+      dst = src.replaceFirst('assets/', '');
+    } else {
+      dst = p.basename(src);
+    }
+
     await copyAssetFile(src, dst);
   }
 }
 
-// Copy the asset file from src to dst.
-// If dst already exists, then just skip the copy
 Future<String> copyAssetFile(String src, [String? dst]) async {
   final Directory directory = await getApplicationSupportDirectory();
   if (dst == null) {
     dst = p.basename(src);
   }
   final target = p.join(directory.path, dst);
-  bool exists = await File(target).exists();
 
-  final data = await rootBundle.load(src);
+  // Create parent directory if it doesn't exist
+  final File targetFile = File(target);
+  if (!await targetFile.parent.exists()) {
+    await targetFile.parent.create(recursive: true);
+  }
 
-  // Only copy if size differs or doesn't exist
-  if (!exists || File(target).lengthSync() != data.lengthInBytes) {
-    final List<int> bytes =
-        data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
-    await (await File(target).create(recursive: true)).writeAsBytes(bytes);
-    debugPrint("Copied asset: $src -> $target");
+  bool exists = await targetFile.exists();
+
+  // Load asset data
+  try {
+    final data = await rootBundle.load(src);
+
+    // Copy if file doesn't exist or size is different
+    if (!exists || targetFile.lengthSync() != data.lengthInBytes) {
+      final List<int> bytes =
+          data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+      await targetFile.writeAsBytes(bytes, flush: true);
+      debugPrint("Copied asset: $src -> $target");
+    }
+  } catch (e) {
+    debugPrint("Skipping asset $src (maybe directory or invalid): $e");
   }
 
   return target;
@@ -76,12 +96,11 @@ Future<String> generateWaveFilename([String suffix = '']) async {
 }
 
 // ============================================================
-// OFFICIAL MODEL CREATION CODE (Integrated from model.dart)
+// OFFICIAL MODEL CREATION CODE
 // ============================================================
 
 Future<sherpa_onnx.OfflineTts> createOfficialOfflineTts() async {
-  // 1. Copy all assets first (Using official utility)
-  // This ensures .onnx, .json, and .tar.bz2 are in AppSupportDirectory
+  // 1. Copy all assets first
   await copyAllAssetFiles();
 
   // 2. Initialize Bindings
@@ -89,22 +108,24 @@ Future<sherpa_onnx.OfflineTts> createOfficialOfflineTts() async {
 
   final Directory directory = await getApplicationSupportDirectory();
 
-  // 3. Define Model Paths (Adapted for your Hindi Model)
+  // Paths
   String modelName = 'hi_IN-pratham-medium.onnx';
   String tokens = 'hi_IN-pratham-medium.onnx.json';
-  String dataDir = 'espeak-ng-data'; // Expected extracted folder
+  String dataDir = 'espeak-ng-data';
 
-  // 4. Handle Zip Extraction for espeak-ng-data
-  // Official code usually assumes folder exists or provides script.
-  // We must extract the zip here because we are on Android.
-  final zipFile = File(p.join(directory.path, 'espeak-ng-data.tar.bz2'));
+  // Zip Extraction Logic (Robust)
+  // Check both location (assets root and support dir) just in case
+  File zipFile = File(p.join(directory.path, 'espeak-ng-data.tar.bz2'));
+
   final targetDir = Directory(p.join(directory.path, dataDir));
 
-  if (!await targetDir.exists()) {
+  // Extract only if target folder is missing or empty
+  if (!await targetDir.exists() || (await targetDir.list().isEmpty)) {
     if (await zipFile.exists()) {
       debugPrint("Extracting espeak-ng-data.tar.bz2...");
-      // Using compute to avoid UI freeze, same as your old robust code
       final bytes = await zipFile.readAsBytes();
+
+      // Compute function use kar rahe hain taaki UI freeze na ho
       final archive = await compute(_decodeArchiveInIsolate, bytes);
 
       for (final file in archive) {
@@ -122,16 +143,13 @@ Future<sherpa_onnx.OfflineTts> createOfficialOfflineTts() async {
     }
   }
 
-  // 5. Construct Full Paths
   modelName = p.join(directory.path, modelName);
-  tokens = p.join(directory.path,
-      tokens); // Note: Json is often used as tokens or lexicon config
+  tokens = p.join(directory.path, tokens);
   dataDir = p.join(directory.path, dataDir);
 
-  // 6. Create Configuration (Official Structure)
   final vits = sherpa_onnx.OfflineTtsVitsModelConfig(
     model: modelName,
-    lexicon: '', // Hindi model usually uses onnx.json or internal
+    lexicon: '',
     tokens: tokens,
     dataDir: dataDir,
   );
@@ -159,14 +177,14 @@ Future<sherpa_onnx.OfflineTts> createOfficialOfflineTts() async {
   return tts;
 }
 
-// Background Isolate for Zip (Helper)
+// Top-level function for isolate
 Archive _decodeArchiveInIsolate(List<int> bytes) {
   final decoded = BZip2Decoder().decodeBytes(bytes);
   return TarDecoder().decodeBytes(decoded);
 }
 
 // ============================================================
-// MAIN APP (Your Jarvis UI)
+// MAIN APP
 // ============================================================
 
 void main() {
@@ -231,15 +249,12 @@ class _JarvisScreenState extends State<JarvisScreen> {
     try {
       setState(() => _statusText = "Preparing Assets (Official)...");
 
-      // A. Initialize TTS using the OFFICIAL logic
-      // This handles initBindings, copying assets, and creating the engine
+      // 1. Init TTS (This handles copying & initBindings)
       _ttsEngine = await createOfficialOfflineTts();
 
       setState(() => _statusText = "Initializing STT...");
 
-      // B. Initialize STT (Online)
-      // We need to get paths for STT models. Since copyAllAssetFiles()
-      // put them in ApplicationSupportDirectory, we access them there.
+      // 2. Init STT
       final Directory directory = await getApplicationSupportDirectory();
 
       final encoderPath = p.join(directory.path, 'tiny-encoder.int8.onnx');
@@ -346,7 +361,6 @@ class _JarvisScreenState extends State<JarvisScreen> {
       final audio = _ttsEngine!.generate(text: text, sid: 0, speed: 1.0);
       if (audio.samples.isEmpty) return;
 
-      // Use the utility function to generate filename
       final filename = await generateWaveFilename();
 
       final ok = sherpa_onnx.writeWave(
@@ -363,7 +377,6 @@ class _JarvisScreenState extends State<JarvisScreen> {
     }
   }
 
-  // --- HELPER: Bytes to Float32 ---
   Float32List convertBytesToFloat32(Uint8List bytes) {
     final int length = bytes.length ~/ 2;
     final Float32List float32List = Float32List(length);
