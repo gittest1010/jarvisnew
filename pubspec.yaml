@@ -48,4 +48,5 @@ flutter:
 
   assets:
     # 3. TTS Data
-    - assets/tts-model.tar.bz2
+    - assets/stt-hi.tar.bz2
+    - assets/tts-hi.tar.bz2
