@@ -47,14 +47,5 @@ flutter:
   uses-material-design: true
 
   assets:
-    # 1. STT Models
-    - assets/tiny-encoder.int8.onnx
-    - assets/tiny-decoder.int8.onnx
-    - assets/tokens.txt
-    
-    # 2. TTS Models
-    - assets/hi_IN-pratham-medium.onnx
-    - assets/hi_IN-pratham-medium.onnx.json
-    
     # 3. TTS Data
-    - assets/espeak-ng-data.tar.bz2
+    - assets/tts-model.tar.bz2

@@ -1,1 +1,2 @@
 *.onnx filter=lfs diff=lfs merge=lfs -text
+assets/tts-model.tar.bz2 filter=lfs diff=lfs merge=lfs -text
