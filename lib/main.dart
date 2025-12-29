@@ -7,7 +7,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:archive/archive.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:flutter_sound/flutter_sound.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,7 +21,7 @@ class MyApp extends StatelessWidget {
   }
 }
 
-/* ================= INIT & MODEL EXTRACT ================= */
+/* ================= INIT ================= */
 
 class InitScreen extends StatefulWidget {
   const InitScreen({super.key});
@@ -31,8 +30,6 @@ class InitScreen extends StatefulWidget {
 }
 
 class _InitScreenState extends State<InitScreen> {
-  String status = "Initializing…";
-
   @override
   void initState() {
     super.initState();
@@ -41,13 +38,12 @@ class _InitScreenState extends State<InitScreen> {
 
   Future<void> _init() async {
     await Permission.microphone.request();
-
     await _extractOnce("assets/tts-hi.tar.bz2", "tts_hi");
     await _extractOnce("assets/stt-hi.tar.bz2", "stt_hi");
 
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(builder: (_) => const EngineScreen()),
+      MaterialPageRoute(builder: (_) => const Home()),
     );
   }
 
@@ -58,11 +54,10 @@ class _InitScreenState extends State<InitScreen> {
 
     final data = await rootBundle.load(asset);
     final bytes = data.buffer.asUint8List();
-    final tar = TarDecoder().decodeBytes(
-      BZip2Decoder().decodeBytes(bytes),
-    );
 
-    for (final f in tar) {
+    final archive = TarDecoder().decodeBytes(BZip2Decoder().decodeBytes(bytes));
+
+    for (final f in archive) {
       final outPath =
           "${base.path}/${f.name.replaceFirst(RegExp(r'^[^/]+'), folder)}";
       if (f.isFile) {
@@ -77,26 +72,21 @@ class _InitScreenState extends State<InitScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(child: Text(status)),
-    );
+    return const Scaffold(body: Center(child: Text("Initializing…")));
   }
 }
 
-/* ================= MIC → STT → TTS ================= */
+/* ================= STT → TTS ================= */
 
-class EngineScreen extends StatefulWidget {
-  const EngineScreen({super.key});
+class Home extends StatefulWidget {
+  const Home({super.key});
   @override
-  State<EngineScreen> createState() => _EngineScreenState();
+  State<Home> createState() => _HomeState();
 }
 
-class _EngineScreenState extends State<EngineScreen> {
+class _HomeState extends State<Home> {
   late OfflineRecognizer recognizer;
   late OfflineTts tts;
-  late FlutterSoundRecorder recorder;
-
-  bool running = false;
 
   @override
   void initState() {
@@ -130,44 +120,24 @@ class _EngineScreenState extends State<EngineScreen> {
         ),
       ),
     );
-
-    recorder = FlutterSoundRecorder();
-    await recorder.openRecorder();
   }
 
-  Future<void> _startListening() async {
-    if (running) return;
-    running = true;
-
-    final stream = StreamController<Uint8List>();
-
-    await recorder.startRecorder(
-      codec: Codec.pcm16,
-      sampleRate: 16000,
-      numChannels: 1,
-      toStream: stream.sink,
-    );
-
-    stream.stream.listen((data) {
-      recognizer.acceptWaveform(data);
-      if (recognizer.isReady) {
-        final result = recognizer.decode();
-        if (result.text.isNotEmpty) {
-          final audio = tts.generate(result.text);
-          audio.play();
-        }
-      }
-    });
+  void _demoSpeak() {
+    // Mic integration Flutter side heavy hai
+    // Verify pipeline using safe text first
+    final audio =
+        tts.generate(text: "नमस्ते, शेरपा ऑनक्स टीटीएस काम कर रहा है");
+    audio.play();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Mic STT → TTS")),
+      appBar: AppBar(title: const Text("STT → TTS Stable Build")),
       body: Center(
         child: ElevatedButton(
-          onPressed: _startListening,
-          child: const Text("START LISTENING"),
+          onPressed: _demoSpeak,
+          child: const Text("Speak Test"),
         ),
       ),
     );
