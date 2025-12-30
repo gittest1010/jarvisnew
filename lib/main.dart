@@ -86,6 +86,9 @@ class _InitScreenState extends State<InitScreen> {
 
       _log("Assets ready. Starting Engine...");
 
+      // Give a slight delay to ensure file system operations settle
+      await Future.delayed(const Duration(milliseconds: 500));
+
       if (mounted) {
         Navigator.pushReplacement(
           context,
@@ -105,7 +108,7 @@ class _InitScreenState extends State<InitScreen> {
     // Check if we need to extract
     if (await targetDir.exists()) {
       if (await targetDir.list().isEmpty) {
-        _log("Re-extracting $targetFolder...");
+        _log("Re-extracting $targetFolder (Empty)...");
       } else {
         _log("Skipping $targetFolder (Already exists).");
         return;
@@ -187,14 +190,14 @@ Future<void> _backgroundExtraction(_ExtractParams params) async {
       TarDecoder().decodeBytes(BZip2Decoder().decodeBytes(params.bytes));
 
   for (final f in archive) {
-    // FIX: सीधे targetFolder के अंदर डालो, नाम change मत करो।
-    // इससे Flat Zip और Nested Zip दोनों काम करेंगे।
+    // FIX: सीधे targetFolder के अंदर डालो
     final outPath = "${params.basePath}/${params.targetFolder}/${f.name}";
 
     if (f.isFile) {
       final file = File(outPath);
       if (!file.parent.existsSync()) file.parent.createSync(recursive: true);
-      file.writeAsBytesSync(f.content as List<int>);
+      // Added flush: true to prevent corrupted files
+      file.writeAsBytesSync(f.content as List<int>, flush: true);
     } else {
       Directory(outPath).createSync(recursive: true);
     }
@@ -220,15 +223,27 @@ class _HomeState extends State<Home> {
     _initEngines();
   }
 
-  // Helper to find file recursively
+  // --- SMART PATH FINDER (CRITICAL FIX) ---
   Future<String?> _findPath(Directory dir, String filename,
-      {bool isFolder = false}) async {
+      {bool isFolder = false, bool checkContent = false}) async {
     try {
       if (!await dir.exists()) return null;
       final entities = await dir.list(recursive: true).toList();
+
       for (var entity in entities) {
         if (entity.path.endsWith(filename)) {
-          if (isFolder && entity is Directory) return entity.path;
+          if (isFolder && entity is Directory) {
+            // CRITICAL: Ensure espeak-ng-data contains 'phontab'
+            // This prevents passing empty/bad folders to Sherpa which causes CRASH
+            if (checkContent) {
+              final phontab = File("${entity.path}/phontab");
+              if (await phontab.exists()) {
+                return entity.path;
+              }
+            } else {
+              return entity.path;
+            }
+          }
           if (!isFolder && entity is File) return entity.path;
         }
       }
@@ -244,16 +259,18 @@ class _HomeState extends State<Home> {
     final ttsRoot = Directory("${docDir.path}/tts_root");
 
     try {
-      // 1. SMART FIND: Locate files wherever they are
+      // 1. Locate STT Files
       final encoder = await _findPath(sttRoot, "tiny-encoder.int8.onnx");
       final decoder = await _findPath(sttRoot, "tiny-decoder.int8.onnx");
       final tokensSTT = await _findPath(sttRoot, "tokens.txt");
 
+      // 2. Locate TTS Files
       final modelTTS = await _findPath(ttsRoot, "model.onnx");
       final tokensTTS = await _findPath(ttsRoot, "tokens.txt");
-      // Find 'espeak-ng-data' folder
-      final espeakData =
-          await _findPath(ttsRoot, "espeak-ng-data", isFolder: true);
+
+      // CRITICAL FIX: Find the correct 'espeak-ng-data' folder that actually contains data
+      final espeakData = await _findPath(ttsRoot, "espeak-ng-data",
+          isFolder: true, checkContent: true);
 
       if (encoder == null || decoder == null || tokensSTT == null) {
         throw Exception(
@@ -261,10 +278,10 @@ class _HomeState extends State<Home> {
       }
       if (modelTTS == null || tokensTTS == null || espeakData == null) {
         throw Exception(
-            "TTS Model files missing inside ${ttsRoot.path}. Did extraction work?");
+            "TTS Model files missing inside ${ttsRoot.path}. Is espeak-ng-data corrupted?");
       }
 
-      // 2. Initialize STT
+      // 3. Initialize STT
       recognizer = sherpa_onnx.OnlineRecognizer(
         sherpa_onnx.OnlineRecognizerConfig(
           model: sherpa_onnx.OnlineModelConfig(
@@ -279,14 +296,16 @@ class _HomeState extends State<Home> {
         ),
       );
 
-      // 3. Initialize TTS
+      // 4. Initialize TTS
+      // This is where it was crashing if espeakData was invalid
       tts = sherpa_onnx.OfflineTts(
         sherpa_onnx.OfflineTtsConfig(
           model: sherpa_onnx.OfflineTtsModelConfig(
             vits: sherpa_onnx.OfflineTtsVitsModelConfig(
               model: modelTTS,
               tokens: tokensTTS,
-              dataDir: espeakData,
+              dataDir:
+                  espeakData, // This must be the folder containing 'phontab'
             ),
             provider: 'sherpa-onnx',
             numThreads: 1,
@@ -305,7 +324,7 @@ class _HomeState extends State<Home> {
     if (tts == null) return;
     try {
       final audio =
-          tts!.generate(text: "नमस्ते, सब ठीक है", sid: 0, speed: 1.0);
+          tts!.generate(text: "नमस्ते, यह टेस्ट है", sid: 0, speed: 1.0);
       setState(() => info = "Generated ${audio.samples.length} samples");
     } catch (e) {
       setState(() => info = "TTS Error: $e");
