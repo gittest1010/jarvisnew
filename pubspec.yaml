@@ -1,5 +1,5 @@
 name: streaming_asr
-description: Sherpa ONNX Voice Assistant with Official Integration
+description: Sherpa ONNX Voice Assistant
 publish_to: 'none'
 version: 1.0.0
 
@@ -16,27 +16,20 @@ dependencies:
   permission_handler: ^11.3.1
   path: ^1.9.0
   
-  # Official Example Dependencies
-  # Latest stable versions
-  url_launcher: ^6.3.1
-  
-  # --- AUDIO RECORDING ---
+  # --- AUDIO ---
   record: ^6.1.2
-
-  # --- AUDIO PLAYBACK ---
   audioplayers: ^6.5.1
   
-  # --- MEDIA KIT ---
-  # Corrected latest stable versions as of Dec 2025
-  media_kit: ^1.2.6
-  # media_kit_libs_video version 1.0.7 is the latest stable that pairs with media_kit
-  media_kit_libs_video: ^1.0.7
-
   # --- AI CORE ---
   sherpa_onnx: ^1.12.20
   
   # --- ZIP EXTRACTION ---
   archive: ^4.0.0
+
+  # Extras from official
+  url_launcher: ^6.3.1
+  media_kit: ^1.2.6
+  media_kit_libs_video: ^1.0.7
 
 dev_dependencies:
   flutter_test:
@@ -47,6 +40,6 @@ flutter:
   uses-material-design: true
 
   assets:
-    # 3. TTS Data
+    # Ensure these files exist in your 'assets' folder!
     - assets/stt-hi.tar.bz2
     - assets/tts-hi.tar.bz2
