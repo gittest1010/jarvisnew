@@ -10,7 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:archive/archive.dart';
 import 'package:archive/archive_io.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa_onnx;
-import 'package:permission_handler/permission_handler.dart'; // Ensure this is imported
+import 'package:permission_handler/permission_handler.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -40,6 +40,7 @@ class InitScreen extends StatefulWidget {
 class _InitScreenState extends State<InitScreen> {
   String status = "Initializing...";
   String debugLog = "";
+  bool hasError = false;
 
   @override
   void initState() {
@@ -47,11 +48,12 @@ class _InitScreenState extends State<InitScreen> {
     _startInitialization();
   }
 
-  void _log(String message) {
+  void _log(String message, {bool isError = false}) {
     debugPrint(message);
     if (mounted) {
       setState(() {
         status = message;
+        if (isError) hasError = true;
         debugLog += "\n$message";
       });
     }
@@ -63,10 +65,11 @@ class _InitScreenState extends State<InitScreen> {
       _log("Requesting permissions...");
       Map<Permission, PermissionStatus> statuses = await [
         Permission.microphone,
+        Permission.storage, // Good to request explicit storage too
       ].request();
 
       if (statuses[Permission.microphone] != PermissionStatus.granted) {
-        _log("WARNING: Mic permission denied!");
+        _log("WARNING: Mic permission denied!", isError: true);
       }
 
       // 2. Initialize Native Bindings
@@ -86,7 +89,7 @@ class _InitScreenState extends State<InitScreen> {
 
       _log("Assets ready. Starting Engine...");
 
-      // Give a slight delay to ensure file system operations settle
+      // Short delay to ensure UI updates before navigation
       await Future.delayed(const Duration(milliseconds: 500));
 
       if (mounted) {
@@ -96,7 +99,7 @@ class _InitScreenState extends State<InitScreen> {
         );
       }
     } catch (e, stack) {
-      _log("CRITICAL ERROR: $e");
+      _log("CRITICAL ERROR: $e", isError: true);
       debugPrintStack(stackTrace: stack);
     }
   }
@@ -105,7 +108,7 @@ class _InitScreenState extends State<InitScreen> {
       String assetPath, String targetFolder, String basePath) async {
     final targetDir = Directory("$basePath/$targetFolder");
 
-    // Check if we need to extract
+    // Check if we need to extract (Simple check: folder exists and not empty)
     if (await targetDir.exists()) {
       if (await targetDir.list().isEmpty) {
         _log("Re-extracting $targetFolder (Empty)...");
@@ -120,10 +123,11 @@ class _InitScreenState extends State<InitScreen> {
     _log("Extracting $assetPath...");
 
     try {
+      // Load asset data
       final ByteData data = await rootBundle.load(assetPath);
       final Uint8List bytes = data.buffer.asUint8List();
 
-      // Run extraction in background
+      // Run extraction in background isolate
       await compute(
           _backgroundExtraction, _ExtractParams(bytes, basePath, targetFolder));
 
@@ -143,28 +147,32 @@ class _InitScreenState extends State<InitScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              if (!status.startsWith("CRITICAL"))
-                const CircularProgressIndicator(),
+              if (!hasError) const CircularProgressIndicator(),
               const SizedBox(height: 20),
               Text(
                 status,
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  color:
-                      status.startsWith("CRITICAL") ? Colors.red : Colors.black,
+                  color: hasError ? Colors.red : Colors.black,
                   fontWeight: FontWeight.bold,
                 ),
               ),
-              if (status.startsWith("CRITICAL")) ...[
+              if (hasError || debugLog.length > 200) ...[
                 const SizedBox(height: 20),
                 Expanded(
-                  child: SingleChildScrollView(
-                    child: Container(
-                      padding: const EdgeInsets.all(10),
+                  child: Container(
+                    padding: const EdgeInsets.all(10),
+                    width: double.infinity,
+                    decoration: BoxDecoration(
                       color: Colors.grey[200],
-                      child: Text(debugLog,
-                          style: const TextStyle(
-                              fontSize: 10, fontFamily: 'monospace')),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: SingleChildScrollView(
+                      child: Text(
+                        debugLog,
+                        style: const TextStyle(
+                            fontSize: 10, fontFamily: 'monospace'),
+                      ),
                     ),
                   ),
                 ),
@@ -177,7 +185,7 @@ class _InitScreenState extends State<InitScreen> {
   }
 }
 
-// --- BACKGROUND ISOLATE LOGIC (FIXED) ---
+// --- BACKGROUND ISOLATE LOGIC ---
 class _ExtractParams {
   final Uint8List bytes;
   final String basePath;
@@ -186,19 +194,26 @@ class _ExtractParams {
 }
 
 Future<void> _backgroundExtraction(_ExtractParams params) async {
+  // Decode BZip2 -> Tar
   final archive =
       TarDecoder().decodeBytes(BZip2Decoder().decodeBytes(params.bytes));
 
   for (final f in archive) {
-    // FIX: सीधे targetFolder के अंदर डालो
-    final outPath = "${params.basePath}/${params.targetFolder}/${f.name}";
+    // Construct safe output path
+    // Remove potentially unsafe characters from filename if necessary
+    final safeName = f.name.replaceAll("../", "");
+    final outPath = "${params.basePath}/${params.targetFolder}/$safeName";
 
     if (f.isFile) {
       final file = File(outPath);
-      if (!file.parent.existsSync()) file.parent.createSync(recursive: true);
-      // Added flush: true to prevent corrupted files
-      file.writeAsBytesSync(f.content as List<int>, flush: true);
+      // Ensure parent directory exists
+      if (!file.parent.existsSync()) {
+        file.parent.createSync(recursive: true);
+      }
+      // Write bytes
+      file.writeAsBytesSync(f.content as List<int>);
     } else {
+      // It's a directory
       Directory(outPath).createSync(recursive: true);
     }
   }
@@ -216,35 +231,49 @@ class _HomeState extends State<Home> {
   sherpa_onnx.OnlineRecognizer? recognizer;
   sherpa_onnx.OfflineTts? tts;
   String info = "Initializing engines...";
+  bool isReady = false;
 
   @override
   void initState() {
     super.initState();
-    _initEngines();
+    // Run after build to prevent UI freeze during initial frame
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initEngines();
+    });
   }
 
-  // --- SMART PATH FINDER (CRITICAL FIX) ---
+  // Helper to find file recursively and return absolute path
   Future<String?> _findPath(Directory dir, String filename,
-      {bool isFolder = false, bool checkContent = false}) async {
+      {bool isFolder = false}) async {
     try {
       if (!await dir.exists()) return null;
-      final entities = await dir.list(recursive: true).toList();
 
+      final entities = await dir.list(recursive: true).toList();
       for (var entity in entities) {
-        if (entity.path.endsWith(filename)) {
+        // Match filename strictly
+        if (entity.path.endsWith(Platform.pathSeparator + filename) ||
+            entity.path.endsWith("/$filename")) {
           if (isFolder && entity is Directory) {
-            // CRITICAL: Ensure espeak-ng-data contains 'phontab'
-            // This prevents passing empty/bad folders to Sherpa which causes CRASH
-            if (checkContent) {
+            // CRITICAL CHECK for Espeak: It must contain 'phontab'
+            if (filename == "espeak-ng-data") {
               final phontab = File("${entity.path}/phontab");
-              if (await phontab.exists()) {
-                return entity.path;
+              if (!phontab.existsSync()) {
+                print(
+                    "Found espeak folder but 'phontab' is missing: ${entity.path}");
+                continue; // Keep looking
               }
-            } else {
+            }
+            return entity.path;
+          }
+
+          if (!isFolder && entity is File) {
+            // CRITICAL CHECK: File must not be empty
+            if (await entity.length() > 0) {
               return entity.path;
+            } else {
+              print("Found $filename but it is empty (0 bytes).");
             }
           }
-          if (!isFolder && entity is File) return entity.path;
         }
       }
     } catch (e) {
@@ -258,76 +287,99 @@ class _HomeState extends State<Home> {
     final sttRoot = Directory("${docDir.path}/stt_root");
     final ttsRoot = Directory("${docDir.path}/tts_root");
 
+    String log = "";
+    bool sttOk = false;
+    bool ttsOk = false;
+
+    // --- 1. Initialize STT ---
     try {
-      // 1. Locate STT Files
       final encoder = await _findPath(sttRoot, "tiny-encoder.int8.onnx");
       final decoder = await _findPath(sttRoot, "tiny-decoder.int8.onnx");
       final tokensSTT = await _findPath(sttRoot, "tokens.txt");
 
-      // 2. Locate TTS Files
+      if (encoder == null || decoder == null || tokensSTT == null) {
+        log += "❌ STT Files Missing.\n";
+      } else {
+        recognizer = sherpa_onnx.OnlineRecognizer(
+          sherpa_onnx.OnlineRecognizerConfig(
+            model: sherpa_onnx.OnlineModelConfig(
+              transducer: sherpa_onnx.OnlineTransducerModelConfig(
+                encoder: encoder,
+                decoder: decoder,
+                joiner: tokensSTT,
+              ),
+              tokens: tokensSTT,
+              numThreads: 1,
+            ),
+          ),
+        );
+        log += "✅ STT Ready.\n";
+        sttOk = true;
+      }
+    } catch (e) {
+      log += "❌ STT Crash: $e\n";
+      print("STT Error: $e");
+    }
+
+    // --- 2. Initialize TTS ---
+    try {
       final modelTTS = await _findPath(ttsRoot, "model.onnx");
       final tokensTTS = await _findPath(ttsRoot, "tokens.txt");
+      final espeakData =
+          await _findPath(ttsRoot, "espeak-ng-data", isFolder: true);
 
-      // CRITICAL FIX: Find the correct 'espeak-ng-data' folder that actually contains data
-      final espeakData = await _findPath(ttsRoot, "espeak-ng-data",
-          isFolder: true, checkContent: true);
-
-      if (encoder == null || decoder == null || tokensSTT == null) {
-        throw Exception(
-            "STT Model files missing inside ${sttRoot.path}. Did extraction work?");
-      }
-      if (modelTTS == null || tokensTTS == null || espeakData == null) {
-        throw Exception(
-            "TTS Model files missing inside ${ttsRoot.path}. Is espeak-ng-data corrupted?");
-      }
-
-      // 3. Initialize STT
-      recognizer = sherpa_onnx.OnlineRecognizer(
-        sherpa_onnx.OnlineRecognizerConfig(
-          model: sherpa_onnx.OnlineModelConfig(
-            transducer: sherpa_onnx.OnlineTransducerModelConfig(
-              encoder: encoder,
-              decoder: decoder,
-              joiner: tokensSTT,
+      if (modelTTS == null || tokensTTS == null) {
+        log += "❌ TTS Files Missing.\n";
+      } else if (espeakData == null) {
+        log += "❌ 'espeak-ng-data' folder missing or invalid.\n";
+      } else {
+        tts = sherpa_onnx.OfflineTts(
+          sherpa_onnx.OfflineTtsConfig(
+            model: sherpa_onnx.OfflineTtsModelConfig(
+              vits: sherpa_onnx.OfflineTtsVitsModelConfig(
+                model: modelTTS,
+                tokens: tokensTTS,
+                dataDir: espeakData,
+              ),
+              provider: 'sherpa-onnx',
+              numThreads: 1,
+              debug: true, // Enable debug logs from C++
             ),
-            tokens: tokensSTT,
-            numThreads: 1,
           ),
-        ),
-      );
-
-      // 4. Initialize TTS
-      // This is where it was crashing if espeakData was invalid
-      tts = sherpa_onnx.OfflineTts(
-        sherpa_onnx.OfflineTtsConfig(
-          model: sherpa_onnx.OfflineTtsModelConfig(
-            vits: sherpa_onnx.OfflineTtsVitsModelConfig(
-              model: modelTTS,
-              tokens: tokensTTS,
-              dataDir:
-                  espeakData, // This must be the folder containing 'phontab'
-            ),
-            provider: 'sherpa-onnx',
-            numThreads: 1,
-          ),
-        ),
-      );
-
-      setState(() => info = "Jarvis Ready 🟢\nTap below to test.");
+        );
+        log += "✅ TTS Ready.\n";
+        ttsOk = true;
+      }
     } catch (e) {
-      setState(() => info = "Engine Init Failed:\n$e");
-      debugPrint("Init Error: $e");
+      log += "❌ TTS Crash: $e\n";
+      print("TTS Error: $e");
+    }
+
+    if (mounted) {
+      setState(() {
+        info = log;
+        isReady = sttOk || ttsOk;
+      });
     }
   }
 
   void _testTts() {
-    if (tts == null) return;
+    if (tts == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("TTS Engine not loaded!")));
+      return;
+    }
     try {
+      // Basic text generation test
       final audio =
-          tts!.generate(text: "नमस्ते, यह टेस्ट है", sid: 0, speed: 1.0);
-      setState(() => info = "Generated ${audio.samples.length} samples");
+          tts!.generate(text: "नमस्ते, आप कैसे हैं?", sid: 0, speed: 1.0);
+
+      setState(() => info += "\n🔊 Generated ${audio.samples.length} samples");
+
+      // Note: Actual audio playback needs the 'audioplayers' package or similar.
+      // This just proves the engine generated raw audio data.
     } catch (e) {
-      setState(() => info = "TTS Error: $e");
+      setState(() => info += "\n❌ Gen Error: $e");
     }
   }
 
@@ -341,20 +393,30 @@ class _HomeState extends State<Home> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Jarvis AI")),
+      appBar: AppBar(title: const Text("Sherpa Safe Mode")),
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Text(info, textAlign: TextAlign.center),
-            ),
-            ElevatedButton(
-              onPressed: _testTts,
-              child: const Text("Test TTS (नमस्ते)"),
-            ),
-          ],
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Text(
+                  info,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontFamily: "monospace"),
+                ),
+              ),
+              const SizedBox(height: 20),
+              ElevatedButton.icon(
+                onPressed: isReady ? _testTts : null,
+                icon: const Icon(Icons.volume_up),
+                label: const Text("Test TTS (नमस्ते)"),
+              ),
+              const SizedBox(height: 10),
+              if (!isReady) const CircularProgressIndicator()
+            ],
+          ),
         ),
       ),
     );

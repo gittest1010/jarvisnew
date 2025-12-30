@@ -1,7 +1,7 @@
 name: streaming_asr
 description: Sherpa ONNX Voice Assistant
 publish_to: 'none'
-version: 1.0.0
+version: 1.0.1
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
@@ -26,7 +26,7 @@ dependencies:
   # --- ZIP EXTRACTION ---
   archive: ^4.0.0
 
-  # Extras from official
+  # Extras
   url_launcher: ^6.3.1
   media_kit: ^1.2.6
   media_kit_libs_video: ^1.0.7
@@ -40,6 +40,5 @@ flutter:
   uses-material-design: true
 
   assets:
-    # Ensure these files exist in your 'assets' folder!
     - assets/stt-hi.tar.bz2
     - assets/tts-hi.tar.bz2
