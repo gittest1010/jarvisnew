@@ -24,17 +24,16 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Jarvis AI',
-      theme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: Colors.cyanAccent,
-        brightness: Brightness.dark, // Futuristic Look
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF1A1A1A),
+        colorScheme: const ColorScheme.dark(primary: Colors.cyanAccent),
       ),
       home: const InitScreen(),
     );
   }
 }
 
-/* ================= 1. INITIALIZATION & VALIDATION SCREEN ================= */
+/* ================= INIT SCREEN ================= */
 
 class InitScreen extends StatefulWidget {
   const InitScreen({super.key});
@@ -43,228 +42,207 @@ class InitScreen extends StatefulWidget {
 }
 
 class _InitScreenState extends State<InitScreen> {
-  String status = "System Initializing...";
-  String errorLog = "";
-  bool isReady = false;
+  String status = "Initializing System...";
+  String logs = "";
   bool isError = false;
-
-  // Countdown variables
-  bool isCountingDown = false;
-  int countdown = 5;
+  Map<String, String> validPaths = {};
 
   @override
   void initState() {
     super.initState();
-    _startSystemCheck();
+    _startSetup();
   }
 
-  void _updateStatus(String msg) {
+  void _log(String msg, {bool error = false}) {
     debugPrint(msg);
-    if (mounted) setState(() => status = msg);
-  }
-
-  void _showError(String error) {
-    debugPrint("ERROR: $error");
     if (mounted) {
       setState(() {
-        status = "System Failure";
-        errorLog = error;
-        isError = true;
+        status = msg;
+        logs += "\n$msg";
+        if (error) isError = true;
       });
     }
   }
 
-  Future<void> _startSystemCheck() async {
+  Future<void> _startSetup() async {
     try {
-      // 1. Permissions
-      _updateStatus("Checking Security Permissions...");
-      await [Permission.microphone].request();
+      _log("Step 1: Permissions...");
+      await Permission.microphone.request();
 
-      // 2. Init Native Libs
-      _updateStatus("Loading Neural Engine...");
+      _log("Step 2: Native Bindings...");
       sherpa_onnx.initBindings();
 
-      // 3. Path Setup
       final docDir = await getApplicationDocumentsDirectory();
       final basePath = docDir.path;
+      _log("Root: $basePath");
 
-      // 4. Extraction (Only if needed)
-      await _manageAsset("assets/stt-hi.tar.bz2", "stt_root", basePath);
-      await _manageAsset("assets/tts-hi.tar.bz2", "tts_root", basePath);
+      // --- EXTRACTION ---
+      await _extractIfNeeded("assets/stt-hi.tar.bz2", "stt_root", basePath);
+      await _extractIfNeeded("assets/tts-hi.tar.bz2", "tts_root", basePath);
 
-      // 5. DEEP VALIDATION (The most important part)
-      _updateStatus("Verifying Integrity...");
-      await _validateFiles(basePath);
+      // --- SMART FINDING (CRITICAL FIX) ---
+      _log("Step 3: Searching for Model Files...");
 
-      // 6. Success
+      final sttDir = Directory("$basePath/stt_root");
+      final ttsDir = Directory("$basePath/tts_root");
+
+      // 1. Find STT Files (in stt-hi folder)
+      final encoder = await _recursiveFind(sttDir, "tiny-encoder.int8.onnx");
+      final decoder = await _recursiveFind(sttDir, "tiny-decoder.int8.onnx");
+
+      // FIX: Check for both tokens.txt AND tokens.text
+      var sttTokens = await _recursiveFind(sttDir, "tokens.txt");
+      if (sttTokens == null) {
+        _log("tokens.txt not found, checking tokens.text...");
+        sttTokens = await _recursiveFind(sttDir, "tokens.text");
+      }
+
+      // 2. Find TTS Files (in tts-hi folder)
+      final ttsModel = await _recursiveFind(ttsDir, "model.onnx");
+
+      // FIX: Check for both tokens.txt AND tokens.text
+      var ttsTokens = await _recursiveFind(ttsDir, "tokens.txt");
+      if (ttsTokens == null) {
+        ttsTokens = await _recursiveFind(ttsDir, "tokens.text");
+      }
+
+      final espeakData =
+          await _recursiveFind(ttsDir, "espeak-ng-data", isFolder: true);
+
+      // --- VALIDATION ---
+      if (encoder == null) throw "STT Encoder missing (tiny-encoder.int8.onnx)";
+      if (decoder == null) throw "STT Decoder missing (tiny-decoder.int8.onnx)";
+      if (sttTokens == null) throw "STT Tokens missing (tokens.txt/text)";
+
+      if (ttsModel == null) throw "TTS Model missing (model.onnx)";
+      if (ttsTokens == null) throw "TTS Tokens missing (tokens.txt/text)";
+      if (espeakData == null) throw "Espeak folder missing in tts_root";
+
+      // Save paths
+      validPaths = {
+        "encoder": encoder,
+        "decoder": decoder,
+        "sttTokens": sttTokens,
+        "ttsModel": ttsModel,
+        "ttsTokens": ttsTokens,
+        "espeakData": espeakData,
+      };
+
+      _log("All files located successfully!");
+      await Future.delayed(const Duration(seconds: 1));
+
       if (mounted) {
-        setState(() {
-          status = "Systems Online";
-          isReady = true;
-        });
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => JarvisHome(paths: validPaths)),
+        );
       }
     } catch (e, stack) {
-      _showError("Critical Error:\n$e");
+      _log("CRITICAL ERROR: $e", error: true);
       debugPrintStack(stackTrace: stack);
     }
   }
 
-  // Smart Extraction: Checks if folder is empty
-  Future<void> _manageAsset(
-      String assetPath, String folderName, String basePath) async {
-    final targetDir = Directory("$basePath/$folderName");
-
-    // Check if folder exists and has content
-    if (await targetDir.exists()) {
-      if (await targetDir.list().isEmpty) {
-        _updateStatus("Repairing $folderName...");
-      } else {
-        _updateStatus("$folderName Found. Skipping extraction.");
-        return; // Already exists
-      }
-    }
-
-    _updateStatus("Extracting $folderName...");
+  // --- SMART RECURSIVE SEARCH ---
+  Future<String?> _recursiveFind(Directory dir, String filename,
+      {bool isFolder = false}) async {
     try {
-      final data = await rootBundle.load(assetPath);
-      final bytes = data.buffer.asUint8List();
-      await compute(
-          _backgroundExtract, _ExtractArgs(bytes, basePath, folderName));
-    } catch (e) {
-      throw Exception("Failed to extract $assetPath. Is the file in assets?");
-    }
-  }
+      if (!await dir.exists()) return null;
 
-  // Validation Logic: Checks specific files
-  Future<void> _validateFiles(String basePath) async {
-    final requiredFiles = {
-      "STT Encoder": "$basePath/stt_root/tiny-encoder.int8.onnx",
-      "STT Decoder": "$basePath/stt_root/tiny-decoder.int8.onnx",
-      "STT Tokens": "$basePath/stt_root/tokens.txt",
-      "TTS Model": "$basePath/tts_root/model.onnx",
-      "TTS Tokens": "$basePath/tts_root/tokens.txt",
-      "Espeak Phontab": "$basePath/tts_root/espeak-ng-data/phontab", // CRITICAL
-    };
-
-    for (var entry in requiredFiles.entries) {
-      final file = File(entry.value);
-      if (!await file.exists()) {
-        throw Exception("MISSING FILE: ${entry.key}\nPath: ${entry.value}");
-      }
-      if (await file.length() < 100) {
-        throw Exception(
-            "CORRUPT FILE: ${entry.key}\nSize too small (<100B). Extraction failed.");
-      }
-    }
-  }
-
-  void _startCountdown() {
-    setState(() {
-      isCountingDown = true;
-    });
-
-    Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (countdown == 1) {
-        timer.cancel();
-        // Launch Main App
-        Navigator.pushReplacement(
-            context, MaterialPageRoute(builder: (_) => const JarvisHome()));
-      } else {
-        if (mounted) {
-          setState(() => countdown--);
+      final entities = dir.listSync(recursive: true);
+      for (var entity in entities) {
+        // Check end of path to match filename regardless of parent folders
+        if (entity.path.endsWith("/$filename") ||
+            entity.path.endsWith("\\$filename")) {
+          // Found it!
+          if (isFolder && entity is Directory) {
+            // Validate Espeak content
+            if (filename == "espeak-ng-data") {
+              if (File("${entity.path}/phontab").existsSync())
+                return entity.path;
+            } else {
+              return entity.path;
+            }
+          } else if (!isFolder && entity is File) {
+            if (entity.lengthSync() > 100)
+              return entity.path; // Ignore empty files
+          }
         }
       }
-    });
+    } catch (e) {
+      print("Search error: $e");
+    }
+    return null;
+  }
+
+  Future<void> _extractIfNeeded(
+      String asset, String folderName, String basePath) async {
+    final target = Directory("$basePath/$folderName");
+    // Simple check: if folder exists and not empty, assume extracted
+    if (await target.exists() && target.listSync().isNotEmpty) {
+      _log("Skipping $folderName (Already exists)");
+      return;
+    }
+    _log("Extracting $asset...");
+    try {
+      final data = await rootBundle.load(asset);
+      final bytes = data.buffer.asUint8List();
+      await compute(_backgroundUnzip, _UnzipArgs(bytes, basePath, folderName));
+    } catch (e) {
+      throw "Asset not found: $asset. Check pubspec.yaml";
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(30.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              // Logo or Icon
-              const Icon(Icons.mic_external_on,
-                  size: 80, color: Colors.cyanAccent),
-              const SizedBox(height: 30),
-
-              if (isCountingDown) ...[
-                Text(
-                  "$countdown",
-                  style: const TextStyle(
-                      fontSize: 80,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.cyanAccent),
-                ),
-                const Text("Launching Core...",
-                    style: TextStyle(color: Colors.white54)),
-              ] else ...[
-                Text(
-                  status,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      fontSize: 18,
-                      color: isError ? Colors.redAccent : Colors.white,
-                      fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 20),
-                if (!isReady && !isError)
-                  const CircularProgressIndicator(color: Colors.cyanAccent),
-                if (isError)
-                  Container(
-                    height: 200,
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                        color: Colors.red.withOpacity(0.1),
-                        border: Border.all(color: Colors.redAccent),
-                        borderRadius: BorderRadius.circular(10)),
-                    child: SingleChildScrollView(
-                      child: Text(errorLog,
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (!isError)
+              const CircularProgressIndicator(color: Colors.cyanAccent),
+            const SizedBox(height: 20),
+            Text(status,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    color: isError ? Colors.red : Colors.white, fontSize: 16)),
+            const SizedBox(height: 20),
+            if (isError)
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  color: Colors.black54,
+                  child: SingleChildScrollView(
+                      child: Text(logs,
                           style: const TextStyle(
-                              color: Colors.red, fontFamily: 'monospace')),
-                    ),
-                  ),
-                if (isReady)
-                  ElevatedButton(
-                    onPressed: _startCountdown,
-                    style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.cyanAccent,
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 40, vertical: 15),
-                        textStyle: const TextStyle(
-                            fontSize: 20, fontWeight: FontWeight.bold)),
-                    child: const Text("START JARVIS"),
-                  ),
-              ]
-            ],
-          ),
+                              fontFamily: 'monospace', fontSize: 12))),
+                ),
+              )
+          ],
         ),
       ),
     );
   }
 }
 
-// Background Isolate Logic
-class _ExtractArgs {
+class _UnzipArgs {
   final Uint8List bytes;
   final String basePath;
   final String targetFolder;
-  _ExtractArgs(this.bytes, this.basePath, this.targetFolder);
+  _UnzipArgs(this.bytes, this.basePath, this.targetFolder);
 }
 
-Future<void> _backgroundExtract(_ExtractArgs args) async {
+Future<void> _backgroundUnzip(_UnzipArgs args) async {
   final archive =
       TarDecoder().decodeBytes(BZip2Decoder().decodeBytes(args.bytes));
   for (final file in archive) {
-    final cleanName = file.name.replaceAll("../", "");
-    final filename = "${args.basePath}/${args.targetFolder}/$cleanName";
+    // Construct path carefully
+    final filename = "${args.basePath}/${args.targetFolder}/${file.name}";
     if (file.isFile) {
       final f = File(filename);
+      // Ensure directory exists
       if (!f.parent.existsSync()) f.parent.createSync(recursive: true);
       f.writeAsBytesSync(file.content as List<int>);
     } else {
@@ -273,89 +251,65 @@ Future<void> _backgroundExtract(_ExtractArgs args) async {
   }
 }
 
-/* ================= 2. MAIN APP LOGIC (JARVIS HOME) ================= */
+/* ================= JARVIS HOME ================= */
 
 class JarvisHome extends StatefulWidget {
-  const JarvisHome({super.key});
+  final Map<String, String> paths;
+  const JarvisHome({super.key, required this.paths});
+
   @override
   State<JarvisHome> createState() => _JarvisHomeState();
 }
 
 class _JarvisHomeState extends State<JarvisHome> {
-  sherpa_onnx.OnlineRecognizer? recognizer;
   sherpa_onnx.OfflineTts? tts;
-  String info = "Engine Active";
+  String info = "Jarvis Active";
 
   @override
   void initState() {
     super.initState();
-    // Initialize engines immediately as files are guaranteed to exist now
-    _initEngines();
+    _initEngine();
   }
 
-  Future<void> _initEngines() async {
+  void _initEngine() {
     try {
-      final docDir = await getApplicationDocumentsDirectory();
-      final basePath = docDir.path;
-
-      // STT Config
-      recognizer = sherpa_onnx.OnlineRecognizer(
-        sherpa_onnx.OnlineRecognizerConfig(
-          model: sherpa_onnx.OnlineModelConfig(
-            transducer: sherpa_onnx.OnlineTransducerModelConfig(
-              encoder: "$basePath/stt_root/tiny-encoder.int8.onnx",
-              decoder: "$basePath/stt_root/tiny-decoder.int8.onnx",
-              joiner: "$basePath/stt_root/tokens.txt",
-            ),
-            tokens: "$basePath/stt_root/tokens.txt",
-            numThreads: 1,
+      // Create TTS Engine with EXACT found paths
+      final config = sherpa_onnx.OfflineTtsConfig(
+        model: sherpa_onnx.OfflineTtsModelConfig(
+          vits: sherpa_onnx.OfflineTtsVitsModelConfig(
+            model: widget.paths["ttsModel"]!,
+            tokens: widget.paths["ttsTokens"]!,
+            dataDir: widget.paths["espeakData"]!,
           ),
+          provider: 'sherpa-onnx',
+          numThreads: 1,
         ),
       );
-
-      // TTS Config
-      tts = sherpa_onnx.OfflineTts(
-        sherpa_onnx.OfflineTtsConfig(
-          model: sherpa_onnx.OfflineTtsModelConfig(
-            vits: sherpa_onnx.OfflineTtsVitsModelConfig(
-              model: "$basePath/tts_root/model.onnx",
-              tokens: "$basePath/tts_root/tokens.txt",
-              dataDir: "$basePath/tts_root/espeak-ng-data",
-            ),
-            provider: 'sherpa-onnx',
-            numThreads: 1,
-            debug: true,
-          ),
-        ),
-      );
-
-      setState(() => info = "Jarvis is Listening...");
-      _speak("System online.");
+      tts = sherpa_onnx.OfflineTts(config);
+      _speak("System Online");
     } catch (e) {
-      setState(() => info = "Engine Init Error: $e");
+      setState(() => info = "Engine Error: $e");
     }
   }
 
   void _speak(String text) {
-    if (tts != null) {
-      tts!.generate(text: text, sid: 0, speed: 1.0);
-    }
+    tts?.generate(text: text, sid: 0, speed: 1.0);
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("JARVIS CORE")),
+      appBar: AppBar(title: const Text("Jarvis Core")),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.graphic_eq, size: 100, color: Colors.blue),
+            const Icon(Icons.mic, size: 80, color: Colors.cyanAccent),
             const SizedBox(height: 20),
-            Text(info, style: const TextStyle(fontSize: 18)),
+            Text(info),
             const SizedBox(height: 20),
             ElevatedButton(
-              onPressed: () => _speak("नमस्ते, मैं तैयार हूँ"),
+              onPressed: () => _speak("नमस्ते, मैं ठीक हूँ"),
               child: const Text("Test Voice"),
             )
           ],
