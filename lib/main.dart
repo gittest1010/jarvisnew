@@ -37,7 +37,7 @@ class MyApp extends StatelessWidget {
   }
 }
 
-/* ==================== INIT SCREEN ==================== */
+/* ==================== INIT SCREEN (SETUP LOGIC) ==================== */
 class InitScreen extends StatefulWidget {
   const InitScreen({super.key});
   @override
@@ -69,95 +69,90 @@ class _InitScreenState extends State<InitScreen> {
 
   Future<void> _startSetup() async {
     try {
-      _log("🔐 Requesting Permissions...");
-      // Request storage explicitly for some Android versions/devices
-      await Permission.storage.request();
+      _log("🔐 Permissions check...");
       await Permission.microphone.request();
+      await Permission.storage.request(); // Important for some Android versions
 
-      _log("⚙️ Initializing Sherpa ONNX Bindings...");
+      _log("⚙️ Init Sherpa Bindings...");
       sherpa.initBindings();
 
       final docDir = await getApplicationDocumentsDirectory();
       final basePath = docDir.path;
 
-      // Extract Assets
-      await _extractIfNeeded("assets/stt-hi.tar.bz2", "stt_root", basePath);
-      await _extractIfNeeded("assets/tts-hi.tar.bz2", "tts_root", basePath);
-
-      // Find Model Files
-      _log("🔍 Locating AI Models...");
+      // Define paths
       final sttDir = Directory("$basePath/stt_root");
       final ttsDir = Directory("$basePath/tts_root");
 
-      if (!await sttDir.exists()) {
-        throw "❌ STT Directory missing at: ${sttDir.path}. Extraction might have failed.";
-      }
-      if (!await ttsDir.exists()) {
-        throw "❌ TTS Directory missing at: ${ttsDir.path}. Extraction might have failed.";
+      // --- PHASE 1: EXTRACTION ---
+      await _extractIfNeeded("assets/stt-hi.tar.bz2", "stt_root", basePath);
+      await _extractIfNeeded("assets/tts-hi.tar.bz2", "tts_root", basePath);
+
+      // --- PHASE 2: FINDING FILES (With Auto-Repair) ---
+      _log("🔍 Locating AI Models...");
+
+      // Try finding files. If critical files are missing, we force re-extract ONCE.
+      bool filesMissing = false;
+
+      // Check STT basic existence
+      if (await _findAny(sttDir, ["encoder", "encoder.onnx"]) == null)
+        filesMissing = true;
+      if (await _findAny(sttDir, ["tokens.txt"]) == null) filesMissing = true;
+
+      // Check TTS basic existence
+      if (await _findAny(ttsDir, ["model.onnx"]) == null) filesMissing = true;
+
+      if (filesMissing) {
+        _log("⚠️ Corrupted or missing files detected. Re-installing...");
+        if (sttDir.existsSync()) sttDir.deleteSync(recursive: true);
+        if (ttsDir.existsSync()) ttsDir.deleteSync(recursive: true);
+
+        // Re-extract fresh
+        await _extractIfNeeded("assets/stt-hi.tar.bz2", "stt_root", basePath,
+            force: true);
+        await _extractIfNeeded("assets/tts-hi.tar.bz2", "tts_root", basePath,
+            force: true);
       }
 
-      // --- STT Files (Online Streaming Model) ---
-      // Looking for Encoder
-      final encoder =
-          await _recursiveFind(sttDir, "encoder-epoch-99-avg-1.onnx") ??
-              await _recursiveFind(sttDir, "encoder.onnx") ??
-              await _recursiveFind(sttDir, "encoder.int8.onnx");
+      // --- PHASE 3: FINAL ASSIGNMENT ---
+      // STT (Streaming Zipformer)
+      final encoder = await _findAny(sttDir,
+          ["encoder-epoch-99-avg-1.onnx", "encoder.onnx", "encoder.int8.onnx"]);
 
-      // Looking for Decoder
-      final decoder =
-          await _recursiveFind(sttDir, "decoder-epoch-99-avg-1.onnx") ??
-              await _recursiveFind(sttDir, "decoder.onnx") ??
-              await _recursiveFind(sttDir, "decoder.int8.onnx");
+      final decoder = await _findAny(sttDir,
+          ["decoder-epoch-99-avg-1.onnx", "decoder.onnx", "decoder.int8.onnx"]);
 
-      // Looking for Joiner
-      final joiner =
-          await _recursiveFind(sttDir, "joiner-epoch-99-avg-1.onnx") ??
-              await _recursiveFind(sttDir, "joiner.onnx") ??
-              await _recursiveFind(sttDir, "joiner.int8.onnx");
+      final joiner = await _findAny(sttDir,
+          ["joiner-epoch-99-avg-1.onnx", "joiner.onnx", "joiner.int8.onnx"]);
 
-      // Looking for STT Tokens (Exact match for tokens.txt)
-      final sttTokens = await _recursiveFind(sttDir, "tokens.txt");
+      final sttTokens = await _findAny(sttDir, ["tokens.txt"]);
 
-      // --- TTS Files ---
-      // Looking for Model
-      final ttsModel = await _recursiveFind(ttsDir, "model.onnx");
-      // Looking for TTS Tokens (Exact match for tokens.txt)
-      final ttsTokens = await _recursiveFind(ttsDir, "tokens.txt");
-      // Looking for eSpeak data folder
-      final espeakData =
-          await _recursiveFind(ttsDir, "espeak-ng-data", isFolder: true);
+      // TTS (VITS)
+      final ttsModel =
+          await _findAny(ttsDir, ["model.onnx", "vits-model.onnx"]);
+      final ttsTokens = await _findAny(ttsDir, ["tokens.txt"]);
+      final espeakData = await _findFolder(ttsDir, "espeak-ng-data");
 
-      // --- VALIDATION AND ERROR REPORTING ---
-      if (encoder == null) {
-        await _diagnoseDirectory(sttDir, "encoder");
-        throw "❌ STT Encoder not found";
-      }
-      if (decoder == null) {
-        await _diagnoseDirectory(sttDir, "decoder");
-        throw "❌ STT Decoder not found";
-      }
-      if (joiner == null) {
-        await _diagnoseDirectory(sttDir, "joiner");
-        throw "❌ STT Joiner not found (Check logs below for found files)";
-      }
-      if (sttTokens == null) {
-        await _diagnoseDirectory(sttDir, "tokens.txt");
-        throw "❌ STT Tokens (tokens.txt) not found";
-      }
-      if (ttsModel == null) {
-        await _diagnoseDirectory(ttsDir, "model.onnx");
-        throw "❌ TTS Model not found";
-      }
-      if (ttsTokens == null) {
-        await _diagnoseDirectory(ttsDir, "tokens.txt");
-        throw "❌ TTS Tokens (tokens.txt) not found in tts_root";
-      }
-      if (espeakData == null) {
-        await _diagnoseDirectory(ttsDir, "espeak-ng-data");
-        throw "❌ eSpeak Data folder not found";
-      }
+      // --- PHASE 4: VALIDATION ---
+      if (encoder == null) throw _errorMsg(sttDir, "STT Encoder");
+      if (decoder == null) throw _errorMsg(sttDir, "STT Decoder");
+      if (joiner == null) throw _errorMsg(sttDir, "STT Joiner");
+      if (sttTokens == null) throw _errorMsg(sttDir, "STT Tokens (tokens.txt)");
 
-      // If we got here, all variables are non-null Strings
+      if (ttsModel == null) throw _errorMsg(ttsDir, "TTS Model");
+      if (ttsTokens == null) throw _errorMsg(ttsDir, "TTS Tokens (tokens.txt)");
+      if (espeakData == null) throw _errorMsg(ttsDir, "eSpeak Data Folder");
+
+      // Verify no cross-talk (Conflict Check)
+      if (!sttTokens.contains("stt_root"))
+        _log("⚠️ Warning: STT tokens path looks wrong: $sttTokens");
+      if (!ttsTokens.contains("tts_root"))
+        _log("⚠️ Warning: TTS tokens path looks wrong: $ttsTokens");
+
+      _log(
+          "✅ Found STT Tokens: ...${sttTokens.substring(sttTokens.length - 20)}");
+      _log(
+          "✅ Found TTS Tokens: ...${ttsTokens.substring(ttsTokens.length - 20)}");
+
       validPaths = {
         "encoder": encoder,
         "decoder": decoder,
@@ -168,7 +163,7 @@ class _InitScreenState extends State<InitScreen> {
         "espeakData": espeakData,
       };
 
-      _log("✅ All Systems Ready. Activating Jarvis...");
+      _log("🚀 Starting Jarvis...");
       await Future.delayed(const Duration(seconds: 1));
 
       if (mounted) {
@@ -178,147 +173,127 @@ class _InitScreenState extends State<InitScreen> {
         );
       }
     } catch (e, stack) {
-      _log("💥 FATAL ERROR: $e", error: true);
+      _log("💥 ERROR: $e", error: true);
       debugPrintStack(stackTrace: stack);
     }
   }
 
-  // Improved Diagnostic: Prints ALL files in the directory to help find the issue
-  Future<void> _diagnoseDirectory(Directory dir, String missingFile) async {
-    _log("\n⚠️ MISSING FILE: '$missingFile'");
-    _log("📂 Scanning: ${dir.path}...");
-    try {
-      if (!await dir.exists()) {
-        _log("❌ Directory does not exist!");
-        return;
-      }
+  String _errorMsg(Directory dir, String missing) {
+    // Dump files to help user debug
+    _listAllFiles(dir);
+    return "Could not find $missing in ${dir.path.split('/').last}";
+  }
 
-      final List<FileSystemEntity> entities = dir.listSync(recursive: true);
-      if (entities.isEmpty) {
-        _log("⚠️ Directory is EMPTY.");
-      } else {
-        int count = 0;
-        for (var entity in entities) {
-          // Only show files, skip directories in the list for clarity
-          if (entity is File) {
-            String name = entity.path.split('/').last;
-            int size = await entity.length();
-            String kb = (size / 1024).toStringAsFixed(1);
-            _log("📄 Found: $name ($kb KB)");
-            count++;
-          }
-        }
-        if (count == 0) _log("⚠️ No files found (only folders?)");
+  void _listAllFiles(Directory dir) {
+    if (!dir.existsSync()) {
+      _log("❌ Directory missing: ${dir.path}");
+      return;
+    }
+    _log("📂 Files in ${dir.path.split('/').last}:");
+    try {
+      final list = dir.listSync(recursive: true);
+      for (var f in list) {
+        if (f is File) _log(" - ${f.path.split('/').last}");
       }
-      _log("ℹ️ Compare the names above with '$missingFile'.");
     } catch (e) {
-      _log("❌ Could not list directory: $e");
+      _log("Error listing files: $e");
     }
   }
 
-  Future<String?> _recursiveFind(Directory dir, String filename,
-      {bool isFolder = false}) async {
+  Future<String?> _findAny(Directory dir, List<String> possibilities) async {
     if (!await dir.exists()) return null;
     try {
       final entities = dir.listSync(recursive: true);
       for (var entity in entities) {
-        // Strict check: The file name must match exactly (case-insensitive)
-        // to avoid finding "old_tokens.txt" when looking for "tokens.txt"
-        final String entityName = entity.uri.pathSegments.last;
+        if (entity is File) {
+          final name = entity.path.split('/').last.toLowerCase();
+          for (var p in possibilities) {
+            // Check if name ends with possibility (handles minor naming diffs)
+            if (name == p.toLowerCase() || name.endsWith(p.toLowerCase())) {
+              return entity.path;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
 
-        if (entityName.toLowerCase() == filename.toLowerCase()) {
-          if (isFolder && entity is Directory) return entity.path;
-          if (!isFolder && entity is File && entity.lengthSync() > 0) {
+  Future<String?> _findFolder(Directory dir, String folderName) async {
+    if (!await dir.exists()) return null;
+    try {
+      final entities = dir.listSync(recursive: true);
+      for (var entity in entities) {
+        if (entity is Directory) {
+          if (entity.path.split('/').last == folderName) {
             return entity.path;
           }
         }
       }
-    } catch (e) {
-      debugPrint("Error searching directory: $e");
-    }
+    } catch (_) {}
     return null;
   }
 
   Future<void> _extractIfNeeded(
-      String asset, String folderName, String basePath) async {
+      String asset, String folderName, String basePath,
+      {bool force = false}) async {
     final target = Directory("$basePath/$folderName");
-    // Simple check: if folder exists and has content, assume extracted.
-    // NOTE: If you changed assets, uninstall the app to force re-extraction!
-    if (await target.exists() && target.listSync().isNotEmpty) {
-      _log("✓ $folderName found");
+
+    if (!force && await target.exists() && target.listSync().isNotEmpty) {
+      _log("✓ $folderName ready");
       return;
     }
 
     _log("📦 Extracting $folderName...");
-    try {
-      final data = await rootBundle.load(asset);
-      final bytes = data.buffer.asUint8List();
-      await compute(_backgroundUnzip, _UnzipArgs(bytes, basePath, folderName));
-      _log("✓ $folderName extracted successfully");
-    } catch (e) {
-      _log("❌ Failed to extract $folderName: $e", error: true);
-      // If extraction fails, we rethrow so the app stops setup
-      rethrow;
-    }
+    final data = await rootBundle.load(asset);
+    final bytes = data.buffer.asUint8List();
+    await compute(_backgroundUnzip, _UnzipArgs(bytes, basePath, folderName));
+    _log("✓ $folderName extracted");
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
+        padding: EdgeInsets.all(20),
         decoration: BoxDecoration(
           gradient: LinearGradient(
             colors: [Color(0xFF0A0E27), Color(0xFF1A1A2E)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
           ),
         ),
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(20.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                if (!isError)
-                  const CircularProgressIndicator(
-                    color: Color(0xFF00E5FF),
-                    strokeWidth: 3,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (!isError)
+              const CircularProgressIndicator(color: Color(0xFF00E5FF)),
+            const SizedBox(height: 20),
+            Text(
+              status,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: isError ? Colors.redAccent : Color(0xFF00E5FF),
+                fontSize: 16,
+              ),
+            ),
+            if (isError) ...[
+              SizedBox(height: 20),
+              Expanded(
+                child: Container(
+                  padding: EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    border: Border.all(color: Colors.redAccent),
+                    borderRadius: BorderRadius.circular(8),
                   ),
-                const SizedBox(height: 30),
-                Text(
-                  status,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: isError ? Colors.redAccent : Color(0xFF00E5FF),
-                    fontSize: 16,
-                    fontWeight: FontWeight.w500,
+                  child: SingleChildScrollView(
+                    child: Text(logs,
+                        style:
+                            TextStyle(fontFamily: 'monospace', fontSize: 11)),
                   ),
                 ),
-                if (isError)
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.only(top: 20.0),
-                      child: Container(
-                        width: double.infinity,
-                        padding: EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                            color: Colors.black45,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(
-                                color: Colors.redAccent.withOpacity(0.5))),
-                        child: SingleChildScrollView(
-                          child: Text(logs,
-                              style: TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: 11,
-                                  color: Colors.white70)),
-                        ),
-                      ),
-                    ),
-                  )
-              ],
-            ),
-          ),
+              ),
+            ]
+          ],
         ),
       ),
     );
@@ -358,17 +333,14 @@ class JarvisHome extends StatefulWidget {
 
 class _JarvisHomeState extends State<JarvisHome>
     with SingleTickerProviderStateMixin {
-  // AI Engines
   sherpa.OfflineTts? _tts;
   sherpa.OnlineRecognizer? _recognizer;
   sherpa.OnlineStream? _stream;
 
-  // Audio
   final AudioRecorder _recorder = AudioRecorder();
   final AudioPlayer _audioPlayer = AudioPlayer();
   StreamSubscription<Uint8List>? _audioSub;
 
-  // State
   bool _isListening = false;
   bool _isSpeaking = false;
   bool _isProcessing = false;
@@ -376,7 +348,6 @@ class _JarvisHomeState extends State<JarvisHome>
   String _statusMessage = "Ready";
   String _lastRecognizedText = "";
 
-  // Animation
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
 
@@ -396,13 +367,7 @@ class _JarvisHomeState extends State<JarvisHome>
 
   void _initAI() async {
     try {
-      _log("🧠 Initializing TTS Engine...");
-      // Ensure we access the map safely
-      if (!widget.paths.containsKey("ttsModel") ||
-          !widget.paths.containsKey("ttsTokens") ||
-          !widget.paths.containsKey("espeakData")) {
-        throw "Missing TTS paths in configuration";
-      }
+      _log("🧠 Starting Engines...");
 
       _tts = sherpa.OfflineTts(
         sherpa.OfflineTtsConfig(
@@ -414,19 +379,9 @@ class _JarvisHomeState extends State<JarvisHome>
             ),
             numThreads: 2,
             debug: false,
-            provider: "cpu",
           ),
         ),
       );
-
-      _log("🎙️ Initializing STT Engine...");
-      // Ensure we access the map safely
-      if (!widget.paths.containsKey("encoder") ||
-          !widget.paths.containsKey("decoder") ||
-          !widget.paths.containsKey("joiner") ||
-          !widget.paths.containsKey("sttTokens")) {
-        throw "Missing STT paths in configuration";
-      }
 
       _recognizer = sherpa.OnlineRecognizer(
         sherpa.OnlineRecognizerConfig(
@@ -439,7 +394,6 @@ class _JarvisHomeState extends State<JarvisHome>
             tokens: widget.paths["sttTokens"]!,
             numThreads: 2,
             debug: false,
-            provider: "cpu",
           ),
           enableEndpoint: true,
           rule1MinTrailingSilence: 2.4,
@@ -448,16 +402,14 @@ class _JarvisHomeState extends State<JarvisHome>
         ),
       );
 
-      _log("✅ Jarvis is now online");
-      _speak("नमस्ते, मैं जार्विस हूं, आपकी सेवा में हाजिर");
-    } catch (e, stack) {
-      _log("❌ AI Init Failed: $e");
-      debugPrintStack(stackTrace: stack);
+      _log("✅ Online");
+      _speak("नमस्ते, मैं तैयार हूं");
+    } catch (e) {
+      _log("❌ Init Error: $e");
     }
   }
 
   void _log(String msg) {
-    debugPrint(msg);
     if (mounted) setState(() => _statusMessage = msg);
   }
 
@@ -473,10 +425,9 @@ class _JarvisHomeState extends State<JarvisHome>
     super.dispose();
   }
 
-  // ========== TTS ==========
+  // ... TTS Logic ...
   Future<void> _speak(String text) async {
     if (text.isEmpty || _tts == null) return;
-
     setState(() {
       _isSpeaking = true;
       _statusMessage = "🔊 Speaking...";
@@ -484,74 +435,55 @@ class _JarvisHomeState extends State<JarvisHome>
 
     try {
       final audio = _tts!.generate(text: text, sid: 0, speed: 1.0);
-      final samples = audio.samples;
-      final sampleRate = audio.sampleRate;
 
-      // Convert Float32 → Int16 PCM
-      final pcm = Int16List(samples.length);
-      for (int i = 0; i < samples.length; i++) {
-        int val = (samples[i] * 32767).round().clamp(-32768, 32767);
-        pcm[i] = val;
+      final pcm = Int16List(audio.samples.length);
+      for (int i = 0; i < audio.samples.length; i++) {
+        pcm[i] = (audio.samples[i] * 32767).round().clamp(-32768, 32767);
       }
 
-      // Create WAV file
       final tempDir = await getTemporaryDirectory();
-      final wavPath = "${tempDir.path}/jarvis_output.wav";
+      final wavPath = "${tempDir.path}/jarvis_out.wav";
       final wavFile = File(wavPath);
-      final wavBytes = _createWav(pcm, sampleRate);
-      await wavFile.writeAsBytes(wavBytes);
+      await wavFile.writeAsBytes(_createWav(pcm, audio.sampleRate));
 
-      // Play the audio
       await _audioPlayer.play(DeviceFileSource(wavPath));
-
-      // Wait for playback to complete
       await _audioPlayer.onPlayerComplete.first;
-
-      _log("✅ Speech complete");
     } catch (e) {
-      _log("❌ TTS Error: $e");
+      _log("TTS Err: $e");
     } finally {
-      if (mounted) {
-        setState(() => _isSpeaking = false);
-      }
+      if (mounted) setState(() => _isSpeaking = false);
     }
   }
 
+  // ... WAV Header Helper ...
   Uint8List _createWav(Int16List pcm, int sampleRate) {
-    final dataSize = pcm.length * 2;
-    final byteRate = sampleRate * 2;
-    final header = BytesBuilder();
-
+    var channels = 1;
+    var byteRate = sampleRate * channels * 2;
+    var header = BytesBuilder();
     header.add(Uint8List.fromList("RIFF".codeUnits));
-    header.add(_int32Bytes(36 + dataSize));
-    header.add(Uint8List.fromList("WAVE".codeUnits));
-    header.add(Uint8List.fromList("fmt ".codeUnits));
+    header.add(_int32Bytes(36 + pcm.length * 2));
+    header.add(Uint8List.fromList("WAVEfmt ".codeUnits));
     header.add(_int32Bytes(16));
-    header.add(_int16Bytes(1)); // PCM
-    header.add(_int16Bytes(1)); // Mono
+    header.add(_int16Bytes(1));
+    header.add(_int16Bytes(channels));
     header.add(_int32Bytes(sampleRate));
     header.add(_int32Bytes(byteRate));
     header.add(_int16Bytes(2));
     header.add(_int16Bytes(16));
     header.add(Uint8List.fromList("data".codeUnits));
-    header.add(_int32Bytes(dataSize));
-
-    final buffer = BytesBuilder();
+    header.add(_int32Bytes(pcm.length * 2));
+    var buffer = BytesBuilder();
     buffer.add(header.toBytes());
     buffer.add(pcm.buffer.asUint8List());
-
     return buffer.toBytes();
   }
 
-  Uint8List _int32Bytes(int value) {
-    return Uint8List(4)..buffer.asByteData().setInt32(0, value, Endian.little);
-  }
+  Uint8List _int32Bytes(int v) =>
+      Uint8List(4)..buffer.asByteData().setInt32(0, v, Endian.little);
+  Uint8List _int16Bytes(int v) =>
+      Uint8List(2)..buffer.asByteData().setInt16(0, v, Endian.little);
 
-  Uint8List _int16Bytes(int value) {
-    return Uint8List(2)..buffer.asByteData().setInt16(0, value, Endian.little);
-  }
-
-  // ========== STT ==========
+  // ... STT Logic ...
   Future<void> _toggleListening() async {
     if (_isListening) {
       await _stopListening();
@@ -561,83 +493,52 @@ class _JarvisHomeState extends State<JarvisHome>
   }
 
   Future<void> _startListening() async {
-    if (_recognizer == null || _isSpeaking || _isProcessing) return;
-
-    if (!await _recorder.hasPermission()) {
-      _log("❌ Microphone permission denied");
-      return;
-    }
+    if (_recognizer == null || _isSpeaking) return;
+    if (!await _recorder.hasPermission()) return;
 
     try {
       _stream = _recognizer!.createStream();
-
-      final config = RecordConfig(
+      await _recorder.startStream(RecordConfig(
         encoder: AudioEncoder.pcm16bits,
         sampleRate: 16000,
         numChannels: 1,
-        autoGain: true,
         echoCancel: true,
         noiseSuppress: true,
-      );
-
-      final audioStream = await _recorder.startStream(config);
+      ));
 
       setState(() {
         _isListening = true;
         _transcribedText = "";
-        _lastRecognizedText = "";
         _statusMessage = "🎤 Listening...";
       });
 
-      _audioSub = audioStream.listen((data) {
-        _processAudio(data);
+      _audioSub = _recorder.onStream!.listen((data) {
+        // Convert Uint8List (PCM16) -> Float32List
+        final int16s = Int16List.view(data.buffer);
+        final float32s = Float32List(int16s.length);
+        for (int i = 0; i < int16s.length; i++)
+          float32s[i] = int16s[i] / 32768.0;
+
+        _stream!.acceptWaveform(samples: float32s, sampleRate: 16000);
+        while (_recognizer!.isReady(_stream!)) {
+          _recognizer!.decode(_stream!);
+        }
+        final result = _recognizer!.getResult(_stream!);
+        if (result.text.isNotEmpty) {
+          setState(() => _transcribedText = result.text);
+        }
+        if (_recognizer!.isEndpoint(_stream!)) _stopListening();
       });
     } catch (e) {
-      _log("❌ Mic error: $e");
-      setState(() => _isListening = false);
-    }
-  }
-
-  void _processAudio(Uint8List data) {
-    if (_stream == null) return;
-
-    // Convert PCM16 → Float32
-    final int16 = Int16List.view(data.buffer);
-    final float32 = Float32List(int16.length);
-    for (int i = 0; i < int16.length; i++) {
-      float32[i] = int16[i] / 32768.0;
-    }
-
-    _stream!.acceptWaveform(samples: float32, sampleRate: 16000);
-
-    while (_recognizer!.isReady(_stream!)) {
-      _recognizer!.decode(_stream!);
-    }
-
-    final result = _recognizer!.getResult(_stream!);
-    final text = result.text.trim();
-
-    if (text.isNotEmpty && text != _lastRecognizedText) {
-      setState(() {
-        _lastRecognizedText = text;
-        _transcribedText = text;
-      });
-    }
-
-    // Auto-stop on endpoint
-    if (_recognizer!.isEndpoint(_stream!)) {
-      _stopListening();
+      _log("Mic Err: $e");
     }
   }
 
   Future<void> _stopListening() async {
     await _audioSub?.cancel();
     await _recorder.stop();
-
     setState(() {
       _isListening = false;
-      _statusMessage =
-          _transcribedText.isEmpty ? "No speech detected" : "Processing...";
       _isProcessing = true;
     });
 
@@ -648,177 +549,86 @@ class _JarvisHomeState extends State<JarvisHome>
     }
   }
 
-  // ========== BRAIN ==========
   Future<void> _handleCommand(String cmd) async {
-    String response = "";
+    String response = "मुझे समझ नहीं आया";
     cmd = cmd.toLowerCase();
+    if (cmd.contains("नमस्ते")) response = "नमस्ते! कहिये क्या सेवा करूँ?";
+    if (cmd.contains("समय")) response = "अभी ${DateTime.now().hour} बजे हैं";
 
-    if (cmd.contains("नमस्ते") || cmd.contains("hello")) {
-      response = "नमस्ते, मैं आपकी क्या मदद कर सकता हूं?";
-    } else if (cmd.contains("समय") || cmd.contains("time")) {
-      final now = DateTime.now();
-      response = "अभी ${now.hour} बजकर ${now.minute} मिनट हुए हैं";
-    } else if (cmd.contains("तारीख") || cmd.contains("date")) {
-      final now = DateTime.now();
-      response = "आज ${now.day} ${_getMonthName(now.month)} ${now.year} है";
-    } else if (cmd.contains("धन्यवाद") || cmd.contains("thank")) {
-      response = "आपका स्वागत है";
-    } else {
-      response =
-          "आपने कहा: $cmd। मैं अभी सीख रहा हूँ, इसलिए कुछ कमांड ही समझ पाता हूँ।";
-    }
-
-    _log("🤖 $response");
+    _log("🤖: $response");
     await _speak(response);
-    if (mounted) {
-      setState(() => _isProcessing = false);
-    }
+    if (mounted) setState(() => _isProcessing = false);
   }
 
-  String _getMonthName(int month) {
-    const months = [
-      "जनवरी",
-      "फरवरी",
-      "मार्च",
-      "अप्रैल",
-      "मई",
-      "जून",
-      "जुलाई",
-      "अगस्त",
-      "सितंबर",
-      "अक्टूबर",
-      "नवंबर",
-      "दिसंबर"
-    ];
-    return months[month - 1];
-  }
-
-  // ========== UI ==========
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
         decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Color(0xFF0A0E27), Color(0xFF16213E)],
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-          ),
-        ),
+            gradient: LinearGradient(
+                colors: [Color(0xFF0A0E27), Color(0xFF16213E)],
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter)),
         child: SafeArea(
           child: Column(
             children: [
-              // Header
               Padding(
-                padding: const EdgeInsets.all(20),
-                child: Text(
-                  "J A R V I S",
-                  style: TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w300,
-                    letterSpacing: 8,
-                    color: Color(0xFF00E5FF),
-                  ),
-                ),
-              ),
-
-              // Transcript Display
-              Expanded(
-                child: Container(
-                  margin: EdgeInsets.symmetric(horizontal: 20),
                   padding: EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.03),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: Colors.white12),
-                  ),
-                  child: SingleChildScrollView(
-                    reverse: true,
-                    child: Column(
-                      children: [
-                        Text(
-                          _transcribedText.isEmpty
-                              ? "Tap mic to speak"
-                              : _transcribedText,
-                          style: TextStyle(
-                            fontSize: 20,
-                            color: _transcribedText.isEmpty
-                                ? Colors.white38
-                                : Color(0xFF00E5FF),
-                            height: 1.5,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                        if (_isProcessing)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 20),
-                            child: CircularProgressIndicator(
-                              color: Color(0xFF00E5FF),
-                              strokeWidth: 2,
-                            ),
-                          ),
-                      ],
+                  child: Text("JARVIS",
+                      style: TextStyle(
+                          fontSize: 30,
+                          color: Color(0xFF00E5FF),
+                          letterSpacing: 5))),
+              Expanded(
+                child: Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(20),
+                    child: Text(
+                      _transcribedText.isEmpty
+                          ? "Tap Mic..."
+                          : _transcribedText,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                          fontSize: 24,
+                          color: _transcribedText.isEmpty
+                              ? Colors.white30
+                              : Colors.white),
                     ),
                   ),
                 ),
               ),
-
-              // Status
-              Padding(
-                padding: EdgeInsets.all(20),
-                child: Text(
-                  _statusMessage,
-                  style: TextStyle(
-                    fontSize: 14,
-                    color: Colors.white60,
+              if (_isProcessing)
+                LinearProgressIndicator(color: Color(0xFF00E5FF)),
+              SizedBox(height: 20),
+              GestureDetector(
+                onTap: _toggleListening,
+                child: AnimatedBuilder(
+                  animation: _pulseAnimation,
+                  builder: (ctx, child) => Transform.scale(
+                    scale: _isListening ? _pulseAnimation.value : 1.0,
+                    child: Container(
+                      height: 80,
+                      width: 80,
+                      decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _isListening
+                              ? Colors.redAccent
+                              : Color(0xFF00E5FF),
+                          boxShadow: [
+                            BoxShadow(
+                                color: (_isListening ? Colors.red : Colors.blue)
+                                    .withOpacity(0.5),
+                                blurRadius: 20)
+                          ]),
+                      child: Icon(_isListening ? Icons.stop : Icons.mic,
+                          color: Colors.white, size: 40),
+                    ),
                   ),
                 ),
               ),
-
-              // Mic Button
-              Padding(
-                padding: EdgeInsets.only(bottom: 50),
-                child: GestureDetector(
-                  onTap: _isSpeaking || _isProcessing ? null : _toggleListening,
-                  child: AnimatedBuilder(
-                    animation: _pulseAnimation,
-                    builder: (context, child) {
-                      return Transform.scale(
-                        scale: _isListening ? _pulseAnimation.value : 1.0,
-                        child: Container(
-                          height: 90,
-                          width: 90,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            gradient: LinearGradient(
-                              colors: _isListening
-                                  ? [Color(0xFFFF1744), Color(0xFFD50000)]
-                                  : [Color(0xFF00E5FF), Color(0xFF0091EA)],
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: (_isListening
-                                        ? Color(0xFFFF1744)
-                                        : Color(0xFF00E5FF))
-                                    .withOpacity(0.6),
-                                blurRadius: 30,
-                                spreadRadius: _isListening ? 10 : 5,
-                              ),
-                            ],
-                          ),
-                          child: Icon(
-                            _isListening
-                                ? Icons.stop_rounded
-                                : Icons.mic_rounded,
-                            size: 45,
-                            color: Colors.white,
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ),
+              SizedBox(height: 40),
+              Text(_statusMessage, style: TextStyle(color: Colors.white54)),
+              SizedBox(height: 20),
             ],
           ),
         ),
