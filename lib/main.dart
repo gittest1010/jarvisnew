@@ -88,7 +88,12 @@ class _InitScreenState extends State<InitScreen> {
       final sttDir = Directory("$basePath/stt_root");
       final ttsDir = Directory("$basePath/tts_root");
 
+      if (!await sttDir.exists()) {
+        throw "❌ STT Directory missing at: ${sttDir.path}. Extraction might have failed.";
+      }
+
       // STT Files (Online Streaming Model)
+      // We look for multiple possible names for robustness
       final encoder =
           await _recursiveFind(sttDir, "encoder-epoch-99-avg-1.onnx") ??
               await _recursiveFind(sttDir, "encoder.onnx") ??
@@ -112,14 +117,28 @@ class _InitScreenState extends State<InitScreen> {
       final espeakData =
           await _recursiveFind(ttsDir, "espeak-ng-data", isFolder: true);
 
-      // Validation
-      if (encoder == null) throw "❌ STT Encoder not found";
-      if (decoder == null) throw "❌ STT Decoder not found";
-      if (joiner == null) throw "❌ STT Joiner not found";
-      if (sttTokens == null) throw "❌ STT Tokens not found";
-      if (ttsModel == null) throw "❌ TTS Model not found";
-      if (ttsTokens == null) throw "❌ TTS Tokens not found";
-      if (espeakData == null) throw "❌ eSpeak Data not found";
+      // --- IMPROVED DIAGNOSTIC LOGIC ---
+      if (encoder == null) {
+        await _diagnoseDirectory(sttDir, "encoder");
+        throw "❌ STT Encoder not found";
+      }
+      if (decoder == null) {
+        await _diagnoseDirectory(sttDir, "decoder");
+        throw "❌ STT Decoder not found";
+      }
+      if (joiner == null) {
+        // This is the specific error you mentioned
+        await _diagnoseDirectory(sttDir, "joiner");
+        throw "❌ STT Joiner not found (See logs for available files)";
+      }
+      if (sttTokens == null) {
+        await _diagnoseDirectory(sttDir, "tokens.txt");
+        throw "❌ STT Tokens not found";
+      }
+      if (ttsModel == null) {
+        await _diagnoseDirectory(ttsDir, "model.onnx");
+        throw "❌ TTS Model not found";
+      }
 
       validPaths = {
         "encoder": encoder,
@@ -128,7 +147,7 @@ class _InitScreenState extends State<InitScreen> {
         "sttTokens": sttTokens,
         "ttsModel": ttsModel,
         "ttsTokens": ttsTokens,
-        "espeakData": espeakData,
+        "espeakData": espeakData ?? "",
       };
 
       _log("✅ All Systems Ready. Activating Jarvis...");
@@ -146,36 +165,72 @@ class _InitScreenState extends State<InitScreen> {
     }
   }
 
+  // New helper to list files when an error occurs
+  Future<void> _diagnoseDirectory(Directory dir, String missingFile) async {
+    _log("⚠️ DIAGNOSTIC MODE: Searching for '$missingFile' failed.");
+    _log("📂 Listing contents of: ${dir.path}");
+    try {
+      if (!await dir.exists()) {
+        _log("❌ Directory does not exist!");
+        return;
+      }
+
+      final List<FileSystemEntity> entities = dir.listSync(recursive: true);
+      if (entities.isEmpty) {
+        _log("⚠️ Directory is EMPTY.");
+      } else {
+        for (var entity in entities) {
+          // Print relative path for cleaner logs
+          String relativePath = entity.path.replaceAll(dir.path, "");
+          _log("📄 Found: $relativePath");
+        }
+      }
+      _log("ℹ️ Check if the file matches one of the above names.");
+    } catch (e) {
+      _log("❌ Could not list directory: $e");
+    }
+  }
+
   Future<String?> _recursiveFind(Directory dir, String filename,
       {bool isFolder = false}) async {
     if (!await dir.exists()) return null;
     try {
       final entities = dir.listSync(recursive: true);
       for (var entity in entities) {
-        if (entity.path.endsWith(filename)) {
+        // Case insensitive check just in case
+        if (entity.path.toLowerCase().endsWith(filename.toLowerCase())) {
           if (isFolder && entity is Directory) return entity.path;
           if (!isFolder && entity is File && entity.lengthSync() > 0) {
             return entity.path;
           }
         }
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint("Error searching directory: $e");
+    }
     return null;
   }
 
   Future<void> _extractIfNeeded(
       String asset, String folderName, String basePath) async {
     final target = Directory("$basePath/$folderName");
+    // Basic check: exists and not empty.
+    // If you changed assets, you might need to clear app data to force re-extract.
     if (await target.exists() && target.listSync().isNotEmpty) {
-      _log("✓ $folderName already extracted");
+      _log("✓ $folderName found (skipping extract)");
       return;
     }
 
     _log("📦 Extracting $folderName...");
-    final data = await rootBundle.load(asset);
-    final bytes = data.buffer.asUint8List();
-    await compute(_backgroundUnzip, _UnzipArgs(bytes, basePath, folderName));
-    _log("✓ $folderName extracted");
+    try {
+      final data = await rootBundle.load(asset);
+      final bytes = data.buffer.asUint8List();
+      await compute(_backgroundUnzip, _UnzipArgs(bytes, basePath, folderName));
+      _log("✓ $folderName extracted successfully");
+    } catch (e) {
+      _log("❌ Failed to extract $folderName: $e", error: true);
+      rethrow;
+    }
   }
 
   @override
@@ -190,25 +245,48 @@ class _InitScreenState extends State<InitScreen> {
           ),
         ),
         child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (!isError)
-                const CircularProgressIndicator(
-                  color: Color(0xFF00E5FF),
-                  strokeWidth: 3,
+          child: Padding(
+            padding: const EdgeInsets.all(20.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (!isError)
+                  const CircularProgressIndicator(
+                    color: Color(0xFF00E5FF),
+                    strokeWidth: 3,
+                  ),
+                const SizedBox(height: 30),
+                Text(
+                  status,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: isError ? Colors.redAccent : Color(0xFF00E5FF),
+                    fontSize: 16,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
-              const SizedBox(height: 30),
-              Text(
-                status,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: isError ? Colors.redAccent : Color(0xFF00E5FF),
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
+                if (isError)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 20.0),
+                    child: Container(
+                      height: 200,
+                      padding: EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                          color: Colors.black45,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                              color: Colors.redAccent.withOpacity(0.5))),
+                      child: SingleChildScrollView(
+                        child: Text(logs,
+                            style: TextStyle(
+                                fontFamily: 'monospace',
+                                fontSize: 10,
+                                color: Colors.white70)),
+                      ),
+                    ),
+                  )
+              ],
+            ),
           ),
         ),
       ),
