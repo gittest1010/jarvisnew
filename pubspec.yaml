@@ -1,40 +1,38 @@
 name: streaming_asr
-description: Sherpa ONNX Voice Assistant
+description: Jarvis AI - Offline Voice Assistant
 publish_to: 'none'
-version: 1.0.1
+version: 1.0.2
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
-  flutter: ">=3.0.0"
+  flutter: ">=3.19.0"
 
 dependencies:
   flutter:
     sdk: flutter
 
-  # --- UTILITIES ---
-  path_provider: ^2.1.2
-  permission_handler: ^11.3.0
+  # Core
+  path_provider: ^2.1.4
+  permission_handler: ^11.3.1
   path: ^1.9.0
-  
-  # --- AUDIO (FIXED VERSIONS) ---
-  # 'record' version 5.1.0 is the stable one. 6.x does not exist yet.
+
+  # Audio
   record: ^6.1.2
-  audioplayers: ^6.0.0
-  
-  # --- AI CORE ---
-  sherpa_onnx: ^1.12.20
-  
-  # --- ZIP EXTRACTION ---
+  audioplayers: ^6.1.0
+
+  # AI
+  sherpa_onnx: ^1.10.27
+
+  # Archive
   archive: ^3.6.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^3.0.0
+  flutter_lints: ^4.0.0
 
 flutter:
   uses-material-design: true
-
   assets:
     - assets/stt-hi.tar.bz2
     - assets/tts-hi.tar.bz2
