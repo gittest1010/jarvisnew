@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:archive/archive.dart';
+// Fixed: Removed duplicate import 'package:archive/archive.dart'
 import 'package:archive/archive_io.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 import 'package:permission_handler/permission_handler.dart';
@@ -149,9 +149,9 @@ class _InitScreenState extends State<InitScreen> {
         _log("⚠️ Warning: TTS tokens path looks wrong: $ttsTokens");
 
       _log(
-          "✅ Found STT Tokens: ...${sttTokens.substring(sttTokens.length - 20)}");
+          "✅ Found STT Tokens: ...${sttTokens.substring(sttTokens.length > 20 ? sttTokens.length - 20 : 0)}");
       _log(
-          "✅ Found TTS Tokens: ...${ttsTokens.substring(ttsTokens.length - 20)}");
+          "✅ Found TTS Tokens: ...${ttsTokens.substring(ttsTokens.length > 20 ? ttsTokens.length - 20 : 0)}");
 
       validPaths = {
         "encoder": encoder,
@@ -498,7 +498,10 @@ class _JarvisHomeState extends State<JarvisHome>
 
     try {
       _stream = _recognizer!.createStream();
-      await _recorder.startStream(RecordConfig(
+
+      // Capture the stream returned by startStream
+      // Using RecordConfig from record package v6.1.2
+      final stream = await _recorder.startStream(RecordConfig(
         encoder: AudioEncoder.pcm16bits,
         sampleRate: 16000,
         numChannels: 1,
@@ -512,7 +515,8 @@ class _JarvisHomeState extends State<JarvisHome>
         _statusMessage = "🎤 Listening...";
       });
 
-      _audioSub = _recorder.onStream!.listen((data) {
+      // Listen to the captured stream instead of onStream
+      _audioSub = stream.listen((data) {
         // Convert Uint8List (PCM16) -> Float32List
         final int16s = Int16List.view(data.buffer);
         final float32s = Float32List(int16s.length);
@@ -531,6 +535,7 @@ class _JarvisHomeState extends State<JarvisHome>
       });
     } catch (e) {
       _log("Mic Err: $e");
+      setState(() => _isListening = false);
     }
   }
 
