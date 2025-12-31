@@ -70,8 +70,9 @@ class _InitScreenState extends State<InitScreen> {
   Future<void> _startSetup() async {
     try {
       _log("🔐 Requesting Permissions...");
-      await Permission.microphone.request();
+      // Request storage explicitly for some Android versions/devices
       await Permission.storage.request();
+      await Permission.microphone.request();
 
       _log("⚙️ Initializing Sherpa ONNX Bindings...");
       sherpa.initBindings();
@@ -91,33 +92,42 @@ class _InitScreenState extends State<InitScreen> {
       if (!await sttDir.exists()) {
         throw "❌ STT Directory missing at: ${sttDir.path}. Extraction might have failed.";
       }
+      if (!await ttsDir.exists()) {
+        throw "❌ TTS Directory missing at: ${ttsDir.path}. Extraction might have failed.";
+      }
 
-      // STT Files (Online Streaming Model)
-      // We look for multiple possible names for robustness
+      // --- STT Files (Online Streaming Model) ---
+      // Looking for Encoder
       final encoder =
           await _recursiveFind(sttDir, "encoder-epoch-99-avg-1.onnx") ??
               await _recursiveFind(sttDir, "encoder.onnx") ??
               await _recursiveFind(sttDir, "encoder.int8.onnx");
 
+      // Looking for Decoder
       final decoder =
           await _recursiveFind(sttDir, "decoder-epoch-99-avg-1.onnx") ??
               await _recursiveFind(sttDir, "decoder.onnx") ??
               await _recursiveFind(sttDir, "decoder.int8.onnx");
 
+      // Looking for Joiner
       final joiner =
           await _recursiveFind(sttDir, "joiner-epoch-99-avg-1.onnx") ??
               await _recursiveFind(sttDir, "joiner.onnx") ??
               await _recursiveFind(sttDir, "joiner.int8.onnx");
 
+      // Looking for STT Tokens (Exact match for tokens.txt)
       final sttTokens = await _recursiveFind(sttDir, "tokens.txt");
 
-      // TTS Files
+      // --- TTS Files ---
+      // Looking for Model
       final ttsModel = await _recursiveFind(ttsDir, "model.onnx");
+      // Looking for TTS Tokens (Exact match for tokens.txt)
       final ttsTokens = await _recursiveFind(ttsDir, "tokens.txt");
+      // Looking for eSpeak data folder
       final espeakData =
           await _recursiveFind(ttsDir, "espeak-ng-data", isFolder: true);
 
-      // --- IMPROVED DIAGNOSTIC LOGIC ---
+      // --- VALIDATION AND ERROR REPORTING ---
       if (encoder == null) {
         await _diagnoseDirectory(sttDir, "encoder");
         throw "❌ STT Encoder not found";
@@ -127,19 +137,27 @@ class _InitScreenState extends State<InitScreen> {
         throw "❌ STT Decoder not found";
       }
       if (joiner == null) {
-        // This is the specific error you mentioned
         await _diagnoseDirectory(sttDir, "joiner");
-        throw "❌ STT Joiner not found (See logs for available files)";
+        throw "❌ STT Joiner not found (Check logs below for found files)";
       }
       if (sttTokens == null) {
         await _diagnoseDirectory(sttDir, "tokens.txt");
-        throw "❌ STT Tokens not found";
+        throw "❌ STT Tokens (tokens.txt) not found";
       }
       if (ttsModel == null) {
         await _diagnoseDirectory(ttsDir, "model.onnx");
         throw "❌ TTS Model not found";
       }
+      if (ttsTokens == null) {
+        await _diagnoseDirectory(ttsDir, "tokens.txt");
+        throw "❌ TTS Tokens (tokens.txt) not found in tts_root";
+      }
+      if (espeakData == null) {
+        await _diagnoseDirectory(ttsDir, "espeak-ng-data");
+        throw "❌ eSpeak Data folder not found";
+      }
 
+      // If we got here, all variables are non-null Strings
       validPaths = {
         "encoder": encoder,
         "decoder": decoder,
@@ -147,7 +165,7 @@ class _InitScreenState extends State<InitScreen> {
         "sttTokens": sttTokens,
         "ttsModel": ttsModel,
         "ttsTokens": ttsTokens,
-        "espeakData": espeakData ?? "",
+        "espeakData": espeakData,
       };
 
       _log("✅ All Systems Ready. Activating Jarvis...");
@@ -165,10 +183,10 @@ class _InitScreenState extends State<InitScreen> {
     }
   }
 
-  // New helper to list files when an error occurs
+  // Improved Diagnostic: Prints ALL files in the directory to help find the issue
   Future<void> _diagnoseDirectory(Directory dir, String missingFile) async {
-    _log("⚠️ DIAGNOSTIC MODE: Searching for '$missingFile' failed.");
-    _log("📂 Listing contents of: ${dir.path}");
+    _log("\n⚠️ MISSING FILE: '$missingFile'");
+    _log("📂 Scanning: ${dir.path}...");
     try {
       if (!await dir.exists()) {
         _log("❌ Directory does not exist!");
@@ -179,13 +197,20 @@ class _InitScreenState extends State<InitScreen> {
       if (entities.isEmpty) {
         _log("⚠️ Directory is EMPTY.");
       } else {
+        int count = 0;
         for (var entity in entities) {
-          // Print relative path for cleaner logs
-          String relativePath = entity.path.replaceAll(dir.path, "");
-          _log("📄 Found: $relativePath");
+          // Only show files, skip directories in the list for clarity
+          if (entity is File) {
+            String name = entity.path.split('/').last;
+            int size = await entity.length();
+            String kb = (size / 1024).toStringAsFixed(1);
+            _log("📄 Found: $name ($kb KB)");
+            count++;
+          }
         }
+        if (count == 0) _log("⚠️ No files found (only folders?)");
       }
-      _log("ℹ️ Check if the file matches one of the above names.");
+      _log("ℹ️ Compare the names above with '$missingFile'.");
     } catch (e) {
       _log("❌ Could not list directory: $e");
     }
@@ -197,8 +222,11 @@ class _InitScreenState extends State<InitScreen> {
     try {
       final entities = dir.listSync(recursive: true);
       for (var entity in entities) {
-        // Case insensitive check just in case
-        if (entity.path.toLowerCase().endsWith(filename.toLowerCase())) {
+        // Strict check: The file name must match exactly (case-insensitive)
+        // to avoid finding "old_tokens.txt" when looking for "tokens.txt"
+        final String entityName = entity.uri.pathSegments.last;
+
+        if (entityName.toLowerCase() == filename.toLowerCase()) {
           if (isFolder && entity is Directory) return entity.path;
           if (!isFolder && entity is File && entity.lengthSync() > 0) {
             return entity.path;
@@ -214,10 +242,10 @@ class _InitScreenState extends State<InitScreen> {
   Future<void> _extractIfNeeded(
       String asset, String folderName, String basePath) async {
     final target = Directory("$basePath/$folderName");
-    // Basic check: exists and not empty.
-    // If you changed assets, you might need to clear app data to force re-extract.
+    // Simple check: if folder exists and has content, assume extracted.
+    // NOTE: If you changed assets, uninstall the app to force re-extraction!
     if (await target.exists() && target.listSync().isNotEmpty) {
-      _log("✓ $folderName found (skipping extract)");
+      _log("✓ $folderName found");
       return;
     }
 
@@ -229,6 +257,7 @@ class _InitScreenState extends State<InitScreen> {
       _log("✓ $folderName extracted successfully");
     } catch (e) {
       _log("❌ Failed to extract $folderName: $e", error: true);
+      // If extraction fails, we rethrow so the app stops setup
       rethrow;
     }
   }
@@ -266,22 +295,24 @@ class _InitScreenState extends State<InitScreen> {
                   ),
                 ),
                 if (isError)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 20.0),
-                    child: Container(
-                      height: 200,
-                      padding: EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                          color: Colors.black45,
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(
-                              color: Colors.redAccent.withOpacity(0.5))),
-                      child: SingleChildScrollView(
-                        child: Text(logs,
-                            style: TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 10,
-                                color: Colors.white70)),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 20.0),
+                      child: Container(
+                        width: double.infinity,
+                        padding: EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                            color: Colors.black45,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                                color: Colors.redAccent.withOpacity(0.5))),
+                        child: SingleChildScrollView(
+                          child: Text(logs,
+                              style: TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontSize: 11,
+                                  color: Colors.white70)),
+                        ),
                       ),
                     ),
                   )
@@ -366,6 +397,13 @@ class _JarvisHomeState extends State<JarvisHome>
   void _initAI() async {
     try {
       _log("🧠 Initializing TTS Engine...");
+      // Ensure we access the map safely
+      if (!widget.paths.containsKey("ttsModel") ||
+          !widget.paths.containsKey("ttsTokens") ||
+          !widget.paths.containsKey("espeakData")) {
+        throw "Missing TTS paths in configuration";
+      }
+
       _tts = sherpa.OfflineTts(
         sherpa.OfflineTtsConfig(
           model: sherpa.OfflineTtsModelConfig(
@@ -382,6 +420,14 @@ class _JarvisHomeState extends State<JarvisHome>
       );
 
       _log("🎙️ Initializing STT Engine...");
+      // Ensure we access the map safely
+      if (!widget.paths.containsKey("encoder") ||
+          !widget.paths.containsKey("decoder") ||
+          !widget.paths.containsKey("joiner") ||
+          !widget.paths.containsKey("sttTokens")) {
+        throw "Missing STT paths in configuration";
+      }
+
       _recognizer = sherpa.OnlineRecognizer(
         sherpa.OnlineRecognizerConfig(
           model: sherpa.OnlineModelConfig(
@@ -420,9 +466,9 @@ class _JarvisHomeState extends State<JarvisHome>
     _pulseController.dispose();
     _audioSub?.cancel();
     _recorder.dispose();
-    _stream = null; // Just set to null, no need to dispose
-    _recognizer = null; // Just set to null, no need to dispose
-    _tts = null; // Just set to null, no need to dispose
+    _stream = null;
+    _recognizer = null;
+    _tts = null;
     _audioPlayer.dispose();
     super.dispose();
   }
