@@ -1,35 +1,31 @@
-name: streaming_asr
-description: Jarvis AI - Offline Voice Assistant
+name: jarvis_ai
+description: "A new Flutter project."
 publish_to: 'none'
-version: 1.0.2
+version: 1.0.0+1
 
 environment:
-  sdk: ">=3.0.0 <4.0.0"
-  flutter: ">=3.19.0"
+  sdk: '>=3.2.0 <4.0.0'
 
 dependencies:
   flutter:
     sdk: flutter
 
-  # Core
-  path_provider: ^2.1.4
-  permission_handler: ^11.3.1
-  path: ^1.9.0
+  cupertino_icons: ^1.0.6
 
-  # Audio
-  record: ^6.1.2
-  audioplayers: ^6.1.0
+  permission_handler: ^11.3.0
+  path_provider: ^2.1.2
 
-  # AI
-  sherpa_onnx: ^1.10.27
+  sherpa_onnx: ^1.10.0
 
-  # Archive
+  record: ^5.2.0
+  audioplayers: ^6.0.0
+
   archive: ^3.6.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^4.0.0
+  flutter_lints: ^3.0.0
 
 flutter:
   uses-material-design: true
