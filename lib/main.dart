@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
-// Fixed: Removed duplicate import 'package:archive/archive.dart'
+import 'package:archive/archive.dart';
 import 'package:archive/archive_io.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 import 'package:permission_handler/permission_handler.dart';
@@ -37,7 +37,10 @@ class MyApp extends StatelessWidget {
   }
 }
 
-/* ==================== INIT SCREEN (SETUP LOGIC) ==================== */
+// Model Type define karne ke liye enum
+enum SttModelType { transducer, whisper }
+
+/* ==================== INIT SCREEN (SMART SETUP) ==================== */
 class InitScreen extends StatefulWidget {
   const InitScreen({super.key});
   @override
@@ -49,6 +52,7 @@ class _InitScreenState extends State<InitScreen> {
   String logs = "";
   bool isError = false;
   Map<String, String> validPaths = {};
+  SttModelType detectedModelType = SttModelType.transducer; // Default
 
   @override
   void initState() {
@@ -69,17 +73,15 @@ class _InitScreenState extends State<InitScreen> {
 
   Future<void> _startSetup() async {
     try {
-      _log("🔐 Permissions check...");
+      _log("🔐 Checking Permissions...");
       await Permission.microphone.request();
-      await Permission.storage.request(); // Important for some Android versions
+      await Permission.storage.request();
 
       _log("⚙️ Init Sherpa Bindings...");
       sherpa.initBindings();
 
       final docDir = await getApplicationDocumentsDirectory();
       final basePath = docDir.path;
-
-      // Define paths
       final sttDir = Directory("$basePath/stt_root");
       final ttsDir = Directory("$basePath/tts_root");
 
@@ -87,89 +89,80 @@ class _InitScreenState extends State<InitScreen> {
       await _extractIfNeeded("assets/stt-hi.tar.bz2", "stt_root", basePath);
       await _extractIfNeeded("assets/tts-hi.tar.bz2", "tts_root", basePath);
 
-      // --- PHASE 2: FINDING FILES (With Auto-Repair) ---
-      _log("🔍 Locating AI Models...");
+      // --- PHASE 2: SMART DETECTION (The Fix) ---
+      _log("🔍 Detecting Model Architecture...");
 
-      // Try finding files. If critical files are missing, we force re-extract ONCE.
-      bool filesMissing = false;
+      // Pehle Encoder dhundte hain (Dono models me hota hai)
+      final encoder = await _smartFind(sttDir, [
+        "encoder.onnx",
+        "encoder.int8.onnx",
+        "tiny-encoder.onnx",
+        "base-encoder.onnx"
+      ]);
 
-      // Check STT basic existence
-      if (await _findAny(sttDir, ["encoder", "encoder.onnx"]) == null)
-        filesMissing = true;
-      if (await _findAny(sttDir, ["tokens.txt"]) == null) filesMissing = true;
+      // Fir Joiner dhundte hain
+      final joiner = await _smartFind(sttDir,
+          ["joiner.onnx", "joiner.int8.onnx", "joiner-epoch-99-avg-1.onnx"]);
 
-      // Check TTS basic existence
-      if (await _findAny(ttsDir, ["model.onnx"]) == null) filesMissing = true;
+      // Decoder dhundte hain
+      final decoder = await _smartFind(sttDir, [
+        "decoder.onnx",
+        "decoder.int8.onnx",
+        "tiny-decoder.onnx",
+        "base-decoder.onnx"
+      ]);
 
-      if (filesMissing) {
-        _log("⚠️ Corrupted or missing files detected. Re-installing...");
-        if (sttDir.existsSync()) sttDir.deleteSync(recursive: true);
-        if (ttsDir.existsSync()) ttsDir.deleteSync(recursive: true);
+      // Tokens dhundte hain
+      final sttTokens = await _smartFind(sttDir, ["tokens.txt"]);
 
-        // Re-extract fresh
-        await _extractIfNeeded("assets/stt-hi.tar.bz2", "stt_root", basePath,
-            force: true);
-        await _extractIfNeeded("assets/tts-hi.tar.bz2", "tts_root", basePath,
-            force: true);
+      // --- LOGIC: JOINER NAHI TO WHISPER ---
+      if (encoder != null && joiner == null) {
+        _log("⚠️ Joiner not found. Assuming WHISPER Model.");
+        detectedModelType = SttModelType.whisper;
+      } else if (encoder != null && joiner != null) {
+        _log("✅ Joiner found. Assuming ZIPFORMER/TRANSDUCER Model.");
+        detectedModelType = SttModelType.transducer;
+      } else {
+        throw "❌ No valid STT model found in stt_root. (Encoder missing)";
       }
 
-      // --- PHASE 3: FINAL ASSIGNMENT ---
-      // STT (Streaming Zipformer)
-      final encoder = await _findAny(sttDir,
-          ["encoder-epoch-99-avg-1.onnx", "encoder.onnx", "encoder.int8.onnx"]);
-
-      final decoder = await _findAny(sttDir,
-          ["decoder-epoch-99-avg-1.onnx", "decoder.onnx", "decoder.int8.onnx"]);
-
-      final joiner = await _findAny(sttDir,
-          ["joiner-epoch-99-avg-1.onnx", "joiner.onnx", "joiner.int8.onnx"]);
-
-      final sttTokens = await _findAny(sttDir, ["tokens.txt"]);
-
-      // TTS (VITS)
+      // --- TTS Files ---
       final ttsModel =
-          await _findAny(ttsDir, ["model.onnx", "vits-model.onnx"]);
-      final ttsTokens = await _findAny(ttsDir, ["tokens.txt"]);
-      final espeakData = await _findFolder(ttsDir, "espeak-ng-data");
+          await _smartFind(ttsDir, ["model.onnx", "vits-model.onnx"]);
+      final ttsTokens = await _smartFind(ttsDir, ["tokens.txt"]);
+      final espeakData = await _smartFindFolder(ttsDir, "espeak-ng-data");
+      // Whisper me joiner zaruri nahi hai, isliye check skip kar rahe hain agar whisper mode hai
+      if (detectedModelType == SttModelType.transducer && joiner == null)
+        throw "STT Joiner Missing (Required for Zipformer)!";
+      if (decoder == null) throw "STT Decoder Missing!";
+      if (sttTokens == null) throw "STT Tokens Missing!";
 
-      // --- PHASE 4: VALIDATION ---
-      if (encoder == null) throw _errorMsg(sttDir, "STT Encoder");
-      if (decoder == null) throw _errorMsg(sttDir, "STT Decoder");
-      if (joiner == null) throw _errorMsg(sttDir, "STT Joiner");
-      if (sttTokens == null) throw _errorMsg(sttDir, "STT Tokens (tokens.txt)");
-
-      if (ttsModel == null) throw _errorMsg(ttsDir, "TTS Model");
-      if (ttsTokens == null) throw _errorMsg(ttsDir, "TTS Tokens (tokens.txt)");
-      if (espeakData == null) throw _errorMsg(ttsDir, "eSpeak Data Folder");
-
-      // Verify no cross-talk (Conflict Check)
-      if (!sttTokens.contains("stt_root"))
-        _log("⚠️ Warning: STT tokens path looks wrong: $sttTokens");
-      if (!ttsTokens.contains("tts_root"))
-        _log("⚠️ Warning: TTS tokens path looks wrong: $ttsTokens");
-
-      _log(
-          "✅ Found STT Tokens: ...${sttTokens.substring(sttTokens.length > 20 ? sttTokens.length - 20 : 0)}");
-      _log(
-          "✅ Found TTS Tokens: ...${ttsTokens.substring(ttsTokens.length > 20 ? ttsTokens.length - 20 : 0)}");
+      if (ttsModel == null) throw "TTS Model Missing!";
+      if (ttsTokens == null) throw "TTS Tokens Missing!";
+      if (espeakData == null) throw "eSpeak Data Missing!";
 
       validPaths = {
         "encoder": encoder,
         "decoder": decoder,
-        "joiner": joiner,
+        "joiner": joiner ?? "", // Empty string if whisper
         "sttTokens": sttTokens,
         "ttsModel": ttsModel,
         "ttsTokens": ttsTokens,
         "espeakData": espeakData,
       };
 
-      _log("🚀 Starting Jarvis...");
+      _log("🚀 Ready! Mode: ${detectedModelType.name.toUpperCase()}");
       await Future.delayed(const Duration(seconds: 1));
 
       if (mounted) {
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (_) => JarvisHome(paths: validPaths)),
+          MaterialPageRoute(
+            builder: (_) => JarvisHome(
+              paths: validPaths,
+              modelType: detectedModelType, // Pass model type
+            ),
+          ),
         );
       }
     } catch (e, stack) {
@@ -178,40 +171,16 @@ class _InitScreenState extends State<InitScreen> {
     }
   }
 
-  String _errorMsg(Directory dir, String missing) {
-    // Dump files to help user debug
-    _listAllFiles(dir);
-    return "Could not find $missing in ${dir.path.split('/').last}";
-  }
-
-  void _listAllFiles(Directory dir) {
-    if (!dir.existsSync()) {
-      _log("❌ Directory missing: ${dir.path}");
-      return;
-    }
-    _log("📂 Files in ${dir.path.split('/').last}:");
-    try {
-      final list = dir.listSync(recursive: true);
-      for (var f in list) {
-        if (f is File) _log(" - ${f.path.split('/').last}");
-      }
-    } catch (e) {
-      _log("Error listing files: $e");
-    }
-  }
-
-  Future<String?> _findAny(Directory dir, List<String> possibilities) async {
+  // Helpers (Same as before)
+  Future<String?> _smartFind(Directory dir, List<String> patterns) async {
     if (!await dir.exists()) return null;
     try {
       final entities = dir.listSync(recursive: true);
       for (var entity in entities) {
         if (entity is File) {
           final name = entity.path.split('/').last.toLowerCase();
-          for (var p in possibilities) {
-            // Check if name ends with possibility (handles minor naming diffs)
-            if (name == p.toLowerCase() || name.endsWith(p.toLowerCase())) {
-              return entity.path;
-            }
+          for (var p in patterns) {
+            if (name.contains(p.toLowerCase())) return entity.path;
           }
         }
       }
@@ -219,15 +188,13 @@ class _InitScreenState extends State<InitScreen> {
     return null;
   }
 
-  Future<String?> _findFolder(Directory dir, String folderName) async {
+  Future<String?> _smartFindFolder(Directory dir, String folderName) async {
     if (!await dir.exists()) return null;
     try {
       final entities = dir.listSync(recursive: true);
       for (var entity in entities) {
         if (entity is Directory) {
-          if (entity.path.split('/').last == folderName) {
-            return entity.path;
-          }
+          if (entity.path.split('/').last == folderName) return entity.path;
         }
       }
     } catch (_) {}
@@ -235,31 +202,26 @@ class _InitScreenState extends State<InitScreen> {
   }
 
   Future<void> _extractIfNeeded(
-      String asset, String folderName, String basePath,
-      {bool force = false}) async {
+      String asset, String folderName, String basePath) async {
     final target = Directory("$basePath/$folderName");
-
-    if (!force && await target.exists() && target.listSync().isNotEmpty) {
+    if (await target.exists() && target.listSync().isNotEmpty) {
       _log("✓ $folderName ready");
       return;
     }
-
     _log("📦 Extracting $folderName...");
     final data = await rootBundle.load(asset);
     final bytes = data.buffer.asUint8List();
     await compute(_backgroundUnzip, _UnzipArgs(bytes, basePath, folderName));
-    _log("✓ $folderName extracted");
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        padding: EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Color(0xFF0A0E27), Color(0xFF1A1A2E)],
-          ),
+        padding: const EdgeInsets.all(20),
+        decoration: const BoxDecoration(
+          gradient:
+              LinearGradient(colors: [Color(0xFF0A0E27), Color(0xFF1A1A2E)]),
         ),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -267,31 +229,23 @@ class _InitScreenState extends State<InitScreen> {
             if (!isError)
               const CircularProgressIndicator(color: Color(0xFF00E5FF)),
             const SizedBox(height: 20),
-            Text(
-              status,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: isError ? Colors.redAccent : Color(0xFF00E5FF),
-                fontSize: 16,
-              ),
-            ),
+            Text(status,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    color:
+                        isError ? Colors.redAccent : const Color(0xFF00E5FF))),
             if (isError) ...[
-              SizedBox(height: 20),
+              const SizedBox(height: 20),
               Expanded(
                 child: Container(
-                  padding: EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: Colors.black54,
-                    border: Border.all(color: Colors.redAccent),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
+                  padding: const EdgeInsets.all(10),
+                  color: Colors.black54,
                   child: SingleChildScrollView(
-                    child: Text(logs,
-                        style:
-                            TextStyle(fontFamily: 'monospace', fontSize: 11)),
-                  ),
+                      child: Text(logs,
+                          style: const TextStyle(
+                              fontFamily: 'monospace', fontSize: 11))),
                 ),
-              ),
+              )
             ]
           ],
         ),
@@ -322,10 +276,12 @@ Future<void> _backgroundUnzip(_UnzipArgs args) async {
   }
 }
 
-/* ==================== JARVIS INTERFACE ==================== */
+/* ==================== JARVIS INTERFACE (DUAL ENGINE) ==================== */
 class JarvisHome extends StatefulWidget {
   final Map<String, String> paths;
-  const JarvisHome({super.key, required this.paths});
+  final SttModelType modelType;
+
+  const JarvisHome({super.key, required this.paths, required this.modelType});
 
   @override
   State<JarvisHome> createState() => _JarvisHomeState();
@@ -333,9 +289,15 @@ class JarvisHome extends StatefulWidget {
 
 class _JarvisHomeState extends State<JarvisHome>
     with SingleTickerProviderStateMixin {
+  // TTS
   sherpa.OfflineTts? _tts;
-  sherpa.OnlineRecognizer? _recognizer;
-  sherpa.OnlineStream? _stream;
+
+  // STT Engines (Only one will be active)
+  sherpa.OnlineRecognizer? _transducerRecognizer;
+  sherpa.OnlineStream? _transducerStream;
+
+  sherpa.OfflineRecognizer? _whisperRecognizer;
+  sherpa.OfflineStream? _whisperStream; // Whisper stream is different
 
   final AudioRecorder _recorder = AudioRecorder();
   final AudioPlayer _audioPlayer = AudioPlayer();
@@ -346,7 +308,6 @@ class _JarvisHomeState extends State<JarvisHome>
   bool _isProcessing = false;
   String _transcribedText = "";
   String _statusMessage = "Ready";
-  String _lastRecognizedText = "";
 
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
@@ -367,8 +328,9 @@ class _JarvisHomeState extends State<JarvisHome>
 
   void _initAI() async {
     try {
-      _log("🧠 Starting Engines...");
+      _log("🧠 Starting AI (${widget.modelType.name})...");
 
+      // 1. Setup TTS (Same for all)
       _tts = sherpa.OfflineTts(
         sherpa.OfflineTtsConfig(
           model: sherpa.OfflineTtsModelConfig(
@@ -377,33 +339,48 @@ class _JarvisHomeState extends State<JarvisHome>
               tokens: widget.paths["ttsTokens"]!,
               dataDir: widget.paths["espeakData"]!,
             ),
-            numThreads: 2,
+            numThreads: 1,
             debug: false,
           ),
         ),
       );
 
-      _recognizer = sherpa.OnlineRecognizer(
-        sherpa.OnlineRecognizerConfig(
-          model: sherpa.OnlineModelConfig(
-            transducer: sherpa.OnlineTransducerModelConfig(
-              encoder: widget.paths["encoder"]!,
-              decoder: widget.paths["decoder"]!,
-              joiner: widget.paths["joiner"]!,
+      // 2. Setup STT based on Type
+      if (widget.modelType == SttModelType.transducer) {
+        // Zipformer / Transducer (Requires Joiner)
+        _transducerRecognizer = sherpa.OnlineRecognizer(
+          sherpa.OnlineRecognizerConfig(
+            model: sherpa.OnlineModelConfig(
+              transducer: sherpa.OnlineTransducerModelConfig(
+                encoder: widget.paths["encoder"]!,
+                decoder: widget.paths["decoder"]!,
+                joiner: widget.paths["joiner"]!,
+              ),
+              tokens: widget.paths["sttTokens"]!,
+              numThreads: 1,
             ),
-            tokens: widget.paths["sttTokens"]!,
-            numThreads: 2,
-            debug: false,
+            enableEndpoint: true,
           ),
-          enableEndpoint: true,
-          rule1MinTrailingSilence: 2.4,
-          rule2MinTrailingSilence: 1.2,
-          rule3MinUtteranceLength: 20,
-        ),
-      );
+        );
+      } else {
+        // Whisper (No Joiner)
+        _whisperRecognizer = sherpa.OfflineRecognizer(
+          sherpa.OfflineRecognizerConfig(
+            model: sherpa.OfflineModelConfig(
+              whisper: sherpa.OfflineWhisperModelConfig(
+                encoder: widget.paths["encoder"]!,
+                decoder: widget.paths["decoder"]!,
+              ),
+              tokens: widget.paths["sttTokens"]!,
+              numThreads: 1,
+              debug: false,
+            ),
+          ),
+        );
+      }
 
       _log("✅ Online");
-      _speak("नमस्ते, मैं तैयार हूं");
+      _speak("System ready. Using ${widget.modelType.name} model.");
     } catch (e) {
       _log("❌ Init Error: $e");
     }
@@ -418,56 +395,46 @@ class _JarvisHomeState extends State<JarvisHome>
     _pulseController.dispose();
     _audioSub?.cancel();
     _recorder.dispose();
-    _stream = null;
-    _recognizer = null;
-    _tts = null;
+    _transducerStream?.free(); // Important for C++ cleanup
+    _transducerRecognizer?.free();
+    _whisperStream?.free();
+    _whisperRecognizer?.free();
+    _tts?.free();
     _audioPlayer.dispose();
     super.dispose();
   }
 
-  // ... TTS Logic ...
   Future<void> _speak(String text) async {
     if (text.isEmpty || _tts == null) return;
     setState(() {
       _isSpeaking = true;
       _statusMessage = "🔊 Speaking...";
     });
-
     try {
       final audio = _tts!.generate(text: text, sid: 0, speed: 1.0);
-
       final pcm = Int16List(audio.samples.length);
       for (int i = 0; i < audio.samples.length; i++) {
         pcm[i] = (audio.samples[i] * 32767).round().clamp(-32768, 32767);
       }
-
       final tempDir = await getTemporaryDirectory();
       final wavPath = "${tempDir.path}/jarvis_out.wav";
-      final wavFile = File(wavPath);
-      await wavFile.writeAsBytes(_createWav(pcm, audio.sampleRate));
-
+      File(wavPath).writeAsBytesSync(_createWav(pcm, audio.sampleRate));
       await _audioPlayer.play(DeviceFileSource(wavPath));
       await _audioPlayer.onPlayerComplete.first;
-    } catch (e) {
-      _log("TTS Err: $e");
-    } finally {
-      if (mounted) setState(() => _isSpeaking = false);
-    }
+    } catch (_) {}
+    if (mounted) setState(() => _isSpeaking = false);
   }
 
-  // ... WAV Header Helper ...
   Uint8List _createWav(Int16List pcm, int sampleRate) {
-    var channels = 1;
-    var byteRate = sampleRate * channels * 2;
     var header = BytesBuilder();
     header.add(Uint8List.fromList("RIFF".codeUnits));
     header.add(_int32Bytes(36 + pcm.length * 2));
     header.add(Uint8List.fromList("WAVEfmt ".codeUnits));
     header.add(_int32Bytes(16));
     header.add(_int16Bytes(1));
-    header.add(_int16Bytes(channels));
+    header.add(_int16Bytes(1));
     header.add(_int32Bytes(sampleRate));
-    header.add(_int32Bytes(byteRate));
+    header.add(_int32Bytes(sampleRate * 2));
     header.add(_int16Bytes(2));
     header.add(_int16Bytes(16));
     header.add(Uint8List.fromList("data".codeUnits));
@@ -483,7 +450,7 @@ class _JarvisHomeState extends State<JarvisHome>
   Uint8List _int16Bytes(int v) =>
       Uint8List(2)..buffer.asByteData().setInt16(0, v, Endian.little);
 
-  // ... STT Logic ...
+  // ========== DUAL ENGINE LISTENING LOGIC ==========
   Future<void> _toggleListening() async {
     if (_isListening) {
       await _stopListening();
@@ -493,15 +460,19 @@ class _JarvisHomeState extends State<JarvisHome>
   }
 
   Future<void> _startListening() async {
-    if (_recognizer == null || _isSpeaking) return;
+    if ((_transducerRecognizer == null && _whisperRecognizer == null) ||
+        _isSpeaking) return;
     if (!await _recorder.hasPermission()) return;
 
-    try {
-      _stream = _recognizer!.createStream();
+    // Create Stream based on Model Type
+    if (widget.modelType == SttModelType.transducer) {
+      _transducerStream = _transducerRecognizer!.createStream();
+    } else {
+      _whisperStream = _whisperRecognizer!.createStream();
+    }
 
-      // Capture the stream returned by startStream
-      // Using RecordConfig from record package v6.1.2
-      final stream = await _recorder.startStream(RecordConfig(
+    try {
+      await _recorder.startStream(const RecordConfig(
         encoder: AudioEncoder.pcm16bits,
         sampleRate: 16000,
         numChannels: 1,
@@ -512,30 +483,39 @@ class _JarvisHomeState extends State<JarvisHome>
       setState(() {
         _isListening = true;
         _transcribedText = "";
-        _statusMessage = "🎤 Listening...";
+        _statusMessage = "🎤 Listening (${widget.modelType.name})...";
       });
 
-      // Listen to the captured stream instead of onStream
-      _audioSub = stream.listen((data) {
-        // Convert Uint8List (PCM16) -> Float32List
+      _audioSub = _recorder.onStream!.listen((data) {
+        // Common PCM -> Float32 Conversion
         final int16s = Int16List.view(data.buffer);
         final float32s = Float32List(int16s.length);
-        for (int i = 0; i < int16s.length; i++)
+        for (int i = 0; i < int16s.length; i++) {
           float32s[i] = int16s[i] / 32768.0;
+        }
 
-        _stream!.acceptWaveform(samples: float32s, sampleRate: 16000);
-        while (_recognizer!.isReady(_stream!)) {
-          _recognizer!.decode(_stream!);
+        if (widget.modelType == SttModelType.transducer) {
+          // --- Transducer (Realtime Streaming) ---
+          _transducerStream!
+              .acceptWaveform(samples: float32s, sampleRate: 16000);
+          while (_transducerRecognizer!.isReady(_transducerStream!)) {
+            _transducerRecognizer!.decode(_transducerStream!);
+          }
+          final result = _transducerRecognizer!.getResult(_transducerStream!);
+          if (result.text.isNotEmpty)
+            setState(() => _transcribedText = result.text);
+          if (_transducerRecognizer!.isEndpoint(_transducerStream!))
+            _stopListening();
+        } else {
+          // --- Whisper (Buffered/Offline) ---
+          // Whisper accepts waveform but usually decodes later.
+          // However, we can feed it chunks.
+          _whisperStream!.acceptWaveform(samples: float32s, sampleRate: 16000);
+          // Whisper usually doesn't update partials well in real-time loop without high CPU usage
         }
-        final result = _recognizer!.getResult(_stream!);
-        if (result.text.isNotEmpty) {
-          setState(() => _transcribedText = result.text);
-        }
-        if (_recognizer!.isEndpoint(_stream!)) _stopListening();
       });
     } catch (e) {
       _log("Mic Err: $e");
-      setState(() => _isListening = false);
     }
   }
 
@@ -545,20 +525,46 @@ class _JarvisHomeState extends State<JarvisHome>
     setState(() {
       _isListening = false;
       _isProcessing = true;
+      _statusMessage = "Processing...";
     });
+
+    // Final Decode
+    if (widget.modelType == SttModelType.whisper && _whisperStream != null) {
+      // For Whisper, we decode once at the end
+      _whisperRecognizer!.decode(_whisperStream!);
+      final result = _whisperRecognizer!.getResult(_whisperStream!);
+      _transcribedText = result.text;
+    } else if (widget.modelType == SttModelType.transducer &&
+        _transducerStream != null) {
+      // Final result already captured, but ensure cleanup
+      final result = _transducerRecognizer!.getResult(_transducerStream!);
+      if (result.text.isNotEmpty) _transcribedText = result.text;
+    }
 
     if (_transcribedText.isNotEmpty) {
       await _handleCommand(_transcribedText);
     } else {
-      setState(() => _isProcessing = false);
+      setState(() {
+        _isProcessing = false;
+        _statusMessage = "No speech detected";
+      });
     }
   }
 
   Future<void> _handleCommand(String cmd) async {
     String response = "मुझे समझ नहीं आया";
     cmd = cmd.toLowerCase();
-    if (cmd.contains("नमस्ते")) response = "नमस्ते! कहिये क्या सेवा करूँ?";
-    if (cmd.contains("समय")) response = "अभी ${DateTime.now().hour} बजे हैं";
+
+    // Simple commands
+    if (cmd.contains("नमस्ते") || cmd.contains("hello")) {
+      response = "नमस्ते! मैं जार्विस हूँ।";
+    } else if (cmd.contains("time") || cmd.contains("समय"))
+      response = "अभी ${DateTime.now().hour} बजे हैं";
+    else if (cmd.contains("kaise") || cmd.contains("how are you"))
+      response = "मैं ठीक हूँ, धन्यवाद!";
+
+    // Echo if unknown
+    if (response == "मुझे समझ नहीं आया") response = "आपने कहा: $cmd";
 
     _log("🤖: $response");
     await _speak(response);
@@ -569,7 +575,7 @@ class _JarvisHomeState extends State<JarvisHome>
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: BoxDecoration(
+        decoration: const BoxDecoration(
             gradient: LinearGradient(
                 colors: [Color(0xFF0A0E27), Color(0xFF16213E)],
                 begin: Alignment.topCenter,
@@ -577,7 +583,7 @@ class _JarvisHomeState extends State<JarvisHome>
         child: SafeArea(
           child: Column(
             children: [
-              Padding(
+              const Padding(
                   padding: EdgeInsets.all(20),
                   child: Text("JARVIS",
                       style: TextStyle(
@@ -587,7 +593,7 @@ class _JarvisHomeState extends State<JarvisHome>
               Expanded(
                 child: Center(
                   child: Padding(
-                    padding: EdgeInsets.all(20),
+                    padding: const EdgeInsets.all(20),
                     child: Text(
                       _transcribedText.isEmpty
                           ? "Tap Mic..."
@@ -603,8 +609,8 @@ class _JarvisHomeState extends State<JarvisHome>
                 ),
               ),
               if (_isProcessing)
-                LinearProgressIndicator(color: Color(0xFF00E5FF)),
-              SizedBox(height: 20),
+                const LinearProgressIndicator(color: Color(0xFF00E5FF)),
+              const SizedBox(height: 20),
               GestureDetector(
                 onTap: _toggleListening,
                 child: AnimatedBuilder(
@@ -618,7 +624,7 @@ class _JarvisHomeState extends State<JarvisHome>
                           shape: BoxShape.circle,
                           color: _isListening
                               ? Colors.redAccent
-                              : Color(0xFF00E5FF),
+                              : const Color(0xFF00E5FF),
                           boxShadow: [
                             BoxShadow(
                                 color: (_isListening ? Colors.red : Colors.blue)
@@ -631,9 +637,10 @@ class _JarvisHomeState extends State<JarvisHome>
                   ),
                 ),
               ),
-              SizedBox(height: 40),
-              Text(_statusMessage, style: TextStyle(color: Colors.white54)),
-              SizedBox(height: 20),
+              const SizedBox(height: 40),
+              Text(_statusMessage,
+                  style: const TextStyle(color: Colors.white54)),
+              const SizedBox(height: 20),
             ],
           ),
         ),
